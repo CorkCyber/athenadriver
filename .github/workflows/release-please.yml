@@ -1,0 +1,44 @@
+name: release-please
+
+# Semantic releases from Conventional Commits. On every master push,
+# release-please reads commits since each module's last release tag and
+# maintains one release PR per module (driver at ".", athenareader, and
+# the three scope/* adapters — see release-please-config.json). Merging
+# a release PR tags the module (directory-prefixed, "/"-separated, e.g.
+# scope/otel/v0.2.0) and publishes a GitHub Release — which then triggers
+# release.yml for validation and, for athenareader, binary artifacts.
+#
+# Bootstrap notes (first release):
+#   * .release-please-manifest.json is seeded with the v2.0.0-era
+#     versions. Push those tags (v2.0.0, athenareader/v1.0.0,
+#     scope/*/v0.1.0) BEFORE the first master push that runs this
+#     workflow, or the missing baseline tags make release-please propose
+#     a release PR spanning the entire history.
+#   * A driver major bump (3.0.0) requires a manual module-path change to
+#     /v3 first — release-please bumps numbers, not import paths. Gate it
+#     with a Release-As footer once the path migration lands.
+#   * Cross-module require pins (e.g. athenareader's require on
+#     athenadriver/v2) are not bumped automatically; update them in the
+#     commit that wants the newer driver.
+#   * PRs opened with the default GITHUB_TOKEN do not trigger the CI
+#     workflow. Swap the token for a PAT / GitHub App token if CI must
+#     run on release PRs; until then, re-run CI by pushing to the PR or
+#     rely on branch protection running it at merge time.
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

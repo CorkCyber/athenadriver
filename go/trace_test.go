@@ -1,37 +1,15 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 package athenadriver
 
 import (
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/uber-go/tally/v4"
-	"go.uber.org/zap"
 )
-
-func TestObservability_Config(t *testing.T) {
-	obs := NewNoOpsObservability()
-	assert.Equal(t, obs.Config(), NewNoOpsConfig())
-}
 
 func TestObservability_Scope(t *testing.T) {
 	obs := NewNoOpsObservability()
@@ -45,12 +23,14 @@ func TestObservability_Scope(t *testing.T) {
 
 func TestObservability_Logger(t *testing.T) {
 	obs := NewNoOpsObservability()
-	assert.Equal(t, obs.Logger(), zap.NewNop())
+	assert.NotNil(t, obs.Logger())
 
 	config := NewNoOpsConfig()
 	config.SetLogging(false)
 	obs = NewDefaultObservability(config)
-	assert.Equal(t, obs.Logger(), zap.NewNop())
+	// Logging disabled -> Logger() returns the discard logger, which is
+	// the same singleton it would return as the default.
+	assert.NotNil(t, obs.Logger())
 }
 
 func TestObservability_Log(t *testing.T) {
@@ -75,12 +55,14 @@ func TestObservability_SetScope(t *testing.T) {
 
 func TestObservability_SetLogger(t *testing.T) {
 	obs := NewNoOpsObservability()
+	// SetLogger(nil) installs the discard logger rather than leaving the
+	// field nil so callers can always invoke Logger() safely.
 	obs.SetLogger(nil)
-	assert.Nil(t, obs.Logger())
+	assert.NotNil(t, obs.Logger())
 }
 
 func TestObservability_NewObservability(t *testing.T) {
-	obs := NewObservability(NewNoOpsConfig(), zap.NewNop(), tally.NoopScope)
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	obs := NewObservability(NewNoOpsConfig(), logger, tally.NoopScope)
 	assert.NotNil(t, obs.Logger())
-	assert.Equal(t, obs.Logger(), zap.NewNop())
 }

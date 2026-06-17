@@ -1,22 +1,4 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 package athenadriver
 
@@ -33,7 +15,7 @@ func TestAthenaConfig(t *testing.T) {
 	wgTags := NewWGTags()
 	wgTags.AddTag("Uber User", "henry.wu@uber.com")
 	wgTags.AddTag("Uber Asset", "abc.efg")
-	wg := NewDefaultWG("henry_wu", nil, wgTags)
+	wg := NewWG("henry_wu", nil, wgTags)
 	testConf := NewNoOpsConfig()
 	err := testConf.SetOutputBucket(s3bucket)
 	assert.Nil(t, err)
@@ -44,9 +26,9 @@ func TestAthenaConfig(t *testing.T) {
 
 	err = testConf.SetWorkGroup(wg)
 	assert.Nil(t, err)
-	assert.Equal(t, testConf.GetUser(), "henry.wu@uber.com")
-	assert.Equal(t, testConf.GetOutputBucket(), "s3://fake-query-results-arbitrary-bucket/")
-	expected := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&db=default&missingAsEmptyString=true&region=us-east-1&tag=%7CUber+User%60henry.wu%40uber.com%7CUber+Asset%60abc.efg&workgroupConfig=%7B%0A++BytesScannedCutoffPerQuery%3A+1073741824%2C%0A++EnforceWorkGroupConfiguration%3A+true%2C%0A++PublishCloudWatchMetricsEnabled%3A+true%2C%0A++RequesterPaysEnabled%3A+false%0A%7D&workgroupName=henry_wu"
+	assert.Equal(t, "henry.wu@uber.com", testConf.GetUser())
+	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/", testConf.GetOutputBucket())
+	expected := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&db=default&missingAsEmptyString=true&region=us-east-1&tag=%7CUber+User%60henry.wu%40uber.com%7CUber+Asset%60abc.efg&workgroupName=henry_wu"
 	actual := testConf.Stringify()
 	assert.Equal(t, actual, expected)
 	w := testConf.GetWorkgroup()
@@ -63,8 +45,8 @@ func TestGetOutputBucket(t *testing.T) {
 	err := testConf.SetOutputBucket(s3bucket)
 	conf, _ := NewConfig(testConf.Stringify())
 	assert.Nil(t, err)
-	assert.Equal(t, testConf.GetOutputBucket(), "s3://fake-query-results-arbitrary-bucket/local/")
-	assert.Equal(t, conf.GetOutputBucket(), "s3://fake-query-results-arbitrary-bucket/local/")
+	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/local/", testConf.GetOutputBucket())
+	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/local/", conf.GetOutputBucket())
 }
 
 func TestAthenaConfigWrongS3Bucket(t *testing.T) {
@@ -100,7 +82,7 @@ func TestAthenaConfigWrongWG(t *testing.T) {
 func TestAthenaConfigSafeString(t *testing.T) {
 	var s3bucket string = "s3://fake-query-results-arbitrary-bucket/"
 
-	wg := NewDefaultWG("henry_wu", nil, nil)
+	wg := NewWG("henry_wu", nil, nil)
 	testConf := NewNoOpsConfig()
 	err := testConf.SetOutputBucket(s3bucket)
 	assert.Nil(t, err)
@@ -115,10 +97,10 @@ func TestAthenaConfigSafeString(t *testing.T) {
 	err = testConf.SetAccessID("thisisanID")
 	assert.Nil(t, err)
 	testConf.SetSessionToken("thisisaToken")
-	assert.Equal(t, testConf.GetUser(), "henry.wu@uber.com")
-	assert.Equal(t, testConf.GetOutputBucket(), "s3://fake-query-results-arbitrary-bucket/")
-	expectedRawString := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&accessID=thisisanID&db=default&missingAsEmptyString=true&region=us-east-1&secretAccessKey=thisisaKey&sessionToken=thisisaToken&tag=&workgroupConfig=%7B%0A++BytesScannedCutoffPerQuery%3A+1073741824%2C%0A++EnforceWorkGroupConfiguration%3A+true%2C%0A++PublishCloudWatchMetricsEnabled%3A+true%2C%0A++RequesterPaysEnabled%3A+false%0A%7D&workgroupName=henry_wu"
-	expectedSafeString := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&accessID=*&db=default&missingAsEmptyString=true&region=us-east-1&secretAccessKey=*&sessionToken=*&tag=&workgroupConfig=%7B%0A++BytesScannedCutoffPerQuery%3A+1073741824%2C%0A++EnforceWorkGroupConfiguration%3A+true%2C%0A++PublishCloudWatchMetricsEnabled%3A+true%2C%0A++RequesterPaysEnabled%3A+false%0A%7D&workgroupName=henry_wu"
+	assert.Equal(t, "henry.wu@uber.com", testConf.GetUser())
+	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/", testConf.GetOutputBucket())
+	expectedRawString := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&accessID=thisisanID&db=default&missingAsEmptyString=true&region=us-east-1&secretAccessKey=thisisaKey&sessionToken=thisisaToken&tag=&workgroupName=henry_wu"
+	expectedSafeString := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&accessID=*&db=default&missingAsEmptyString=true&region=us-east-1&secretAccessKey=*&sessionToken=*&tag=&workgroupName=henry_wu"
 	actualRaw := testConf.Stringify()
 	actualSafe := testConf.SafeStringify()
 	assert.Equal(t, expectedRawString, actualRaw)
@@ -133,7 +115,7 @@ func TestConfig_SetMaskedColumnValue(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	testConf.SetMaskedColumnValue("abc", "xxx")
 	m, b := testConf.CheckColumnMasked("abc")
-	assert.Equal(t, m, "xxx")
+	assert.Equal(t, "xxx", m)
 	assert.True(t, b)
 	m, b = testConf.CheckColumnMasked("ABC")
 	assert.NotEqual(t, m, "xxx")
@@ -211,7 +193,7 @@ func TestConfig_NewConfig(t *testing.T) {
 }
 
 func TestConfig_GetWorkgroup(t *testing.T) {
-	wg := NewDefaultWG("henry_wu", nil, nil)
+	wg := NewWG("henry_wu", nil, nil)
 	testConf := NewNoOpsConfig()
 	err := testConf.SetWorkGroup(wg)
 	assert.Nil(t, err)
@@ -227,57 +209,57 @@ func TestConfig_SetReadOnly(t *testing.T) {
 
 func TestConfig_GetDB(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	assert.Equal(t, testConf.GetDB(), DefaultDBName)
+	assert.Equal(t, DefaultDBName, testConf.GetDB())
 	testConf.SetDB("")
-	assert.Equal(t, testConf.GetDB(), DefaultDBName)
+	assert.Equal(t, DefaultDBName, testConf.GetDB())
 }
 
 func TestConfig_GetRegion(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	assert.Equal(t, testConf.GetRegion(), DefaultRegion)
+	assert.Equal(t, DefaultRegion, testConf.GetRegion())
 	testConf = &Config{
 		dsn:    *new(url.URL),
 		values: url.Values{},
 	}
-	assert.Equal(t, testConf.GetRegion(), GetFromEnvVal(regionEnvKeys))
+	assert.Equal(t, GetFromEnvVal(regionEnvKeys), testConf.GetRegion())
 }
 
 func TestConfig_GetAccessID(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	testConf.SetAccessID("abc")
-	assert.Equal(t, testConf.GetAccessID(), "abc")
+	assert.Equal(t, "abc", testConf.GetAccessID())
 	testConf = &Config{
 		dsn:    *new(url.URL),
 		values: url.Values{},
 	}
-	assert.Equal(t, testConf.GetAccessID(), GetFromEnvVal(credAccessEnvKey))
+	assert.Equal(t, GetFromEnvVal(credAccessEnvKey), testConf.GetAccessID())
 }
 
 func TestConfig_GetSecretAccessKey(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	testConf.SetSecretAccessKey("abc")
-	assert.Equal(t, testConf.GetSecretAccessKey(), "abc")
+	assert.Equal(t, "abc", testConf.GetSecretAccessKey())
 	testConf = &Config{
 		dsn:    *new(url.URL),
 		values: url.Values{},
 	}
-	assert.Equal(t, testConf.GetSecretAccessKey(), GetFromEnvVal(credSecretEnvKey))
+	assert.Equal(t, GetFromEnvVal(credSecretEnvKey), testConf.GetSecretAccessKey())
 }
 
 func TestConfig_GetSessionToken(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	testConf.SetSessionToken("abc")
-	assert.Equal(t, testConf.GetSessionToken(), "abc")
+	assert.Equal(t, "abc", testConf.GetSessionToken())
 	testConf = &Config{
 		dsn:    *new(url.URL),
 		values: url.Values{},
 	}
-	assert.Equal(t, testConf.GetSessionToken(), GetFromEnvVal(credSessionEnvKey))
+	assert.Equal(t, GetFromEnvVal(credSessionEnvKey), testConf.GetSessionToken())
 }
 
 func TestConfig_WGConfig(t *testing.T) {
 	conf := NewWGConfig(10*DefaultBytesScannedCutoffPerQuery, true, true, false, nil)
-	wg := NewDefaultWG("workgroup1", conf, nil)
+	wg := NewWG("workgroup1", conf, nil)
 	assert.Equal(t, *wg.Config.BytesScannedCutoffPerQuery, int64(DefaultBytesScannedCutoffPerQuery*10))
 }
 
@@ -292,7 +274,7 @@ func TestConfig_SetMoneyWise(t *testing.T) {
 func TestConfig_SetAWSProfile(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	testConf.SetAWSProfile("development")
-	assert.Equal(t, testConf.GetAWSProfile(), "development")
+	assert.Equal(t, "development", testConf.GetAWSProfile())
 }
 
 func TestConfig_SetServiceLimitOverride(t *testing.T) {

@@ -1,22 +1,4 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 package athenadriver
 
@@ -25,16 +7,85 @@ import (
 	"database/sql/driver"
 	"fmt"
 	"io"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
 
-	"go.uber.org/zap"
+	"log/slog"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 )
+
+// Pre-computed reflect.Type tokens for ColumnTypeScanType. Built once at init,
+// no runtime reflection.
+var (
+	scanTypeInt8    = reflect.TypeFor[int8]()
+	scanTypeInt16   = reflect.TypeFor[int16]()
+	scanTypeInt32   = reflect.TypeFor[int32]()
+	scanTypeInt64   = reflect.TypeFor[int64]()
+	scanTypeFloat32 = reflect.TypeFor[float32]()
+	scanTypeFloat64 = reflect.TypeFor[float64]()
+	scanTypeBool    = reflect.TypeFor[bool]()
+	scanTypeString  = reflect.TypeFor[string]()
+	scanTypeTime    = reflect.TypeFor[time.Time]()
+	scanTypeUnknown = reflect.TypeFor[any]()
+)
+
+// athenaTypeMeta describes how the driver surfaces a single Athena column
+// type to database/sql callers: the reflect.Type returned from
+// RowsColumnTypeScanType, and the zero value handed back when
+// MissingAsDefault is enabled and a row has no value for the column.
+//
+// The parse step (string -> Go value) lives in athenaTypeToGoType because
+// each Athena type needs its own width/format handling.
+type athenaTypeMeta struct {
+	scanType   reflect.Type
+	defaultVal any
+}
+
+// athenaTypes is the single source of truth for Athena column types the
+// driver recognizes. ColumnTypeScanType and getDefaultValueForColumnType
+// both index into this map; athenaTypeToGoType's parse switch covers the
+// same key set. Types listed here as scanTypeString are returned to
+// database/sql as Go strings (Athena's text-shaped types and anything the
+// driver does not specially decode).
+var athenaTypes = map[string]athenaTypeMeta{
+	"tinyint":  {scanTypeInt8, 0},
+	"smallint": {scanTypeInt16, 0},
+	"integer":  {scanTypeInt32, 0},
+	"bigint":   {scanTypeInt64, 0},
+
+	"float":  {scanTypeFloat32, 0.0},
+	"real":   {scanTypeFloat32, 0.0},
+	"double": {scanTypeFloat64, 0.0},
+
+	"boolean": {scanTypeBool, false},
+
+	"date":                     {scanTypeTime, time.Time{}},
+	"time":                     {scanTypeTime, time.Time{}},
+	"time with time zone":      {scanTypeTime, time.Time{}},
+	"timestamp":                {scanTypeTime, time.Time{}},
+	"timestamp with time zone": {scanTypeTime, time.Time{}},
+
+	"json":                   {scanTypeString, ""},
+	"char":                   {scanTypeString, ""},
+	"varchar":                {scanTypeString, ""},
+	"varbinary":              {scanTypeString, ""},
+	"row":                    {scanTypeString, ""},
+	"string":                 {scanTypeString, ""},
+	"binary":                 {scanTypeString, ""},
+	"struct":                 {scanTypeString, ""},
+	"interval year to month": {scanTypeString, ""},
+	"interval day to second": {scanTypeString, ""},
+	"decimal":                {scanTypeString, ""},
+	"ipaddress":              {scanTypeString, ""},
+	"array":                  {scanTypeString, ""},
+	"map":                    {scanTypeString, ""},
+	"unknown":                {scanTypeString, ""},
+}
 
 // Rows defines rows in AWS Athena ResultSet.
 type Rows struct {
@@ -46,6 +97,39 @@ type Rows struct {
 	config          *Config
 	tracer          *DriverTracer
 	pageCount       int64
+	paginator       *athena.GetQueryResultsPaginator
+	// queryExecution is the terminal-state QueryExecution returned by
+	// GetQueryExecution at the end of the polling loop. Used by the
+	// StatementType / SubstatementType accessors and any caller that needs
+	// scan-bytes or engine-version metadata. May be nil for Rows returned
+	// from cached-query (QID-direct) paths or non-ops helpers.
+	queryExecution *athenatypes.QueryExecution
+}
+
+// QueryID returns the Athena query execution ID for the rows. Useful for
+// logging or follow-up StopQueryExecution / GetQueryExecution calls.
+func (r *Rows) QueryID() string { return r.queryID }
+
+// StatementType returns the top-level statement type Athena assigned to the
+// query (DML, DDL, UTILITY, ...). Returns "" if the underlying query
+// execution metadata is not available (e.g. Rows came from a cached-result
+// path).
+func (r *Rows) StatementType() string {
+	if r.queryExecution == nil {
+		return ""
+	}
+	return string(r.queryExecution.StatementType)
+}
+
+// SubstatementType returns Athena's finer-grained classification of the
+// statement (SELECT, INSERT, CREATE_TABLE_AS_SELECT, ...). Returns "" if
+// the underlying query execution metadata is not available or if Athena did
+// not populate the field for this statement.
+func (r *Rows) SubstatementType() string {
+	if r.queryExecution == nil || r.queryExecution.SubstatementType == nil {
+		return ""
+	}
+	return *r.queryExecution.SubstatementType
 }
 
 // NewNonOpsRows is to create a new Rows.
@@ -72,8 +156,11 @@ func NewRows(ctx context.Context, client AthenaClient, queryID string, driverCon
 		config:    driverConfig,
 		tracer:    obs,
 		pageCount: -1,
+		paginator: athena.NewGetQueryResultsPaginator(client, &athena.GetQueryResultsInput{
+			QueryExecutionId: aws.String(queryID),
+		}),
 	}
-	if err := r.fetchNextPage(nil); err != nil {
+	if err := r.fetchNextPage(); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -91,12 +178,54 @@ func (r *Rows) Columns() []string {
 // ColumnTypeDatabaseTypeName will be called by sql framework.
 func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
 	colInfo := r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo[index]
-	if colInfo.Type != nil {
-		return *colInfo.Type
+	if colInfo.Type == nil {
+		// Treat a missing type the same way the sibling ColumnType* methods
+		// treat unknown shapes — return a zero value rather than logging an
+		// error, since the sql framework calls these on every column and a
+		// nil here is benign at the call site.
+		return ""
 	}
-	r.tracer.Scope().Counter(DriverName + ".failure.columntypedatabasetypename").Inc(1)
-	r.tracer.Log(ErrorLevel, "ColumnTypeDatabaseTypeName failed", zap.Int("index", index))
-	return ""
+	return *colInfo.Type
+}
+
+// ColumnTypeScanType implements driver.RowsColumnTypeScanType. Returns the Go
+// type that values from athenaTypeToGoType land in for the given column index.
+// database/sql uses this when callers do sql.ColumnType.ScanType().
+func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
+	colInfo := r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo[index]
+	if colInfo.Type == nil {
+		return scanTypeUnknown
+	}
+	if meta, ok := athenaTypes[*colInfo.Type]; ok {
+		return meta.scanType
+	}
+	return scanTypeUnknown
+}
+
+// ColumnTypeNullable implements driver.RowsColumnTypeNullable. Athena's
+// ColumnInfo.Nullable currently always reports UNKNOWN per the SDK docs, so
+// this returns ok=false in that case. Wired up so it starts reporting real
+// values if/when Athena begins populating the field.
+func (r *Rows) ColumnTypeNullable(index int) (nullable, ok bool) {
+	colInfo := r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo[index]
+	switch colInfo.Nullable {
+	case athenatypes.ColumnNullableNotNull:
+		return false, true
+	case athenatypes.ColumnNullableNullable:
+		return true, true
+	default:
+		return false, false
+	}
+}
+
+// ColumnTypePrecisionScale implements driver.RowsColumnTypePrecisionScale.
+// Meaningful for `decimal` columns; returns ok=false otherwise.
+func (r *Rows) ColumnTypePrecisionScale(index int) (precision, scale int64, ok bool) {
+	colInfo := r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo[index]
+	if colInfo.Type == nil || *colInfo.Type != "decimal" {
+		return 0, 0, false
+	}
+	return int64(colInfo.Precision), int64(colInfo.Scale), true
 }
 
 // Next is to get next result set page.
@@ -105,13 +234,13 @@ func (r *Rows) Next(dest []driver.Value) error {
 		return io.EOF
 	}
 	if len(r.ResultOutput.ResultSet.Rows) == 0 {
-		if r.ResultOutput.NextToken == nil || *r.ResultOutput.NextToken == "" {
-			// this means we reach the last page - no token and no rows
+		if r.paginator == nil || !r.paginator.HasMorePages() {
+			// no paginator (e.g. NewNonOpsRows path) or no more pages — done.
 			r.reachedLastPage = true
 			return io.EOF
 		}
 
-		if err := r.fetchNextPage(r.ResultOutput.NextToken); err != nil {
+		if err := r.fetchNextPage(); err != nil {
 			return err
 		}
 		if r.reachedLastPage {
@@ -129,20 +258,22 @@ func (r *Rows) Next(dest []driver.Value) error {
 	return nil
 }
 
-// fetchNextPage is to get next result set page with a specific token.
-func (r *Rows) fetchNextPage(token *string) error {
-	var err error
-	r.ResultOutput, err = r.athena.GetQueryResults(r.ctx,
-		&athena.GetQueryResultsInput{
-			QueryExecutionId: aws.String(r.queryID),
-			NextToken:        token,
-		})
+// fetchNextPage retrieves the next result page via the v2 SDK paginator. The
+// paginator carries the NextToken state across calls, so callers don't pass
+// a token in.
+func (r *Rows) fetchNextPage() error {
+	if r.paginator == nil || !r.paginator.HasMorePages() {
+		r.reachedLastPage = true
+		return nil
+	}
+	out, err := r.paginator.NextPage(r.ctx)
 	if err != nil {
 		r.tracer.Scope().Counter(DriverName + ".failure.fetchnextpage.getqueryresults").Inc(1)
-		r.tracer.Log(ErrorLevel, "GetQueryResults failed", zap.String("error", err.Error()))
+		r.tracer.Log(ErrorLevel, "GetQueryResults failed", slog.String("error", err.Error()))
 		r.reachedLastPage = true
 		return err
 	}
+	r.ResultOutput = out
 
 	r.pageCount++
 	// First row of the first page contains header if the query is not DDL.
@@ -164,7 +295,7 @@ func (r *Rows) fetchNextPage(token *string) error {
 		if rowLen > 0 {
 			rowColLen := len(r.ResultOutput.ResultSet.Rows[0].Data)
 			if colLen < rowColLen {
-				for i := 0; i < rowColLen-colLen; i++ {
+				for i := range rowColLen - colLen {
 					colName := "_col" + strconv.Itoa(i+colLen)
 					colType := "string"
 					colInfo := newColumnInfo(colName, colType)
@@ -172,7 +303,7 @@ func (r *Rows) fetchNextPage(token *string) error {
 						colInfo)
 				}
 			} else if colLen > rowColLen && rowColLen == 1 {
-				for k := 0; k < rowLen; k++ {
+				for k := range rowLen {
 					items := strings.Split(*r.ResultOutput.ResultSet.Rows[k].Data[0].VarCharValue, "\t")
 					if len(items) == colLen {
 						for i, v := range items {
@@ -226,10 +357,11 @@ func (r *Rows) fetchNextPage(token *string) error {
 
 // Close is to close Rows after reading all data.
 func (r *Rows) Close() error {
-	if r.ResultOutput != nil && r.ResultOutput.NextToken != nil {
+	if r.paginator != nil && r.paginator.HasMorePages() {
 		r.tracer.Log(WarnLevel, "rows close prematurely, queryID: "+r.queryID)
 		r.ResultOutput = nil
 	}
+	r.paginator = nil
 	r.reachedLastPage = true
 	return nil
 }
@@ -240,15 +372,10 @@ func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.
 	for i, val := range rdata {
 		value, err := r.athenaTypeToGoType(columns[i], val.VarCharValue, driverConfig)
 		if err != nil {
-			r.tracer.Log(ErrorLevel, "convertrow failed", zap.String("error", err.Error()))
+			r.tracer.Log(ErrorLevel, "convertrow failed", slog.String("error", err.Error()))
 			r.tracer.Scope().Counter(DriverName + ".failure.convertrow").Inc(1)
 			return err
 		}
-		/*r.tracer.Log(DebugLevel, "TM",
-			zap.String("athenaType", *columns[i].Type),
-			zap.String("goType", reflect.TypeOf(value).String()),
-			zap.String("str", *val.VarCharValue),
-		)*/
 		ret[i] = value
 	}
 	return nil
@@ -264,16 +391,16 @@ func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.
 // json is also undocumented above, but appears here https://docs.aws.amazon.com/athena/latest/ug/querying-JSON.html
 // The full list is here: https://prestodb.io/docs/0.172/language/types.html
 // Include ipaddress for forward compatibility.
-func (r *Rows) athenaTypeToGoType(columnInfo athenatypes.ColumnInfo, rawValue *string, driverConfig *Config) (interface{}, error) {
+func (r *Rows) athenaTypeToGoType(columnInfo athenatypes.ColumnInfo, rawValue *string, driverConfig *Config) (any, error) {
 	if maskedValue, masked := driverConfig.CheckColumnMasked(*columnInfo.Name); masked { // "comma ok" idiom
 		return maskedValue, nil
 	}
 	if rawValue == nil {
 		r.tracer.Scope().Counter(DriverName + ".missingvalue").Inc(1)
 		r.tracer.Log(ErrorLevel, "missing data",
-			zap.String("columnInfo.Name", *columnInfo.Name),
-			zap.String("queryID", r.queryID),
-			zap.String("workgroup", driverConfig.GetWorkgroup().Name))
+			slog.String("columnInfo.Name", *columnInfo.Name),
+			slog.String("queryID", r.queryID),
+			slog.String("workgroup", driverConfig.GetWorkgroup().Name))
 		if driverConfig.IsMissingAsNil() {
 			return nil, nil
 		} else if driverConfig.IsMissingAsEmptyString() {
@@ -282,8 +409,8 @@ func (r *Rows) athenaTypeToGoType(columnInfo athenatypes.ColumnInfo, rawValue *s
 			return r.getDefaultValueForColumnType(*columnInfo.Type), nil
 		}
 		r.tracer.Scope().Counter(DriverName + ".failure.convertvalue.config").Inc(1)
-		r.tracer.Log(ErrorLevel, "missing data", zap.String("columnInfo.Name", *columnInfo.Name))
-		return nil, fmt.Errorf("Missing data at column " + *columnInfo.Name)
+		r.tracer.Log(ErrorLevel, "missing data", slog.String("columnInfo.Name", *columnInfo.Name))
+		return nil, fmt.Errorf("missing data at column %s", *columnInfo.Name)
 	}
 	val := *rawValue
 	// https://stackoverflow.com/questions/30299649/parse-string-to-specific-type-of-int-int8-int16-int32-int64
@@ -337,7 +464,7 @@ func (r *Rows) athenaTypeToGoType(columnInfo athenatypes.ColumnInfo, rawValue *s
 			return false, nil
 		}
 		r.tracer.Scope().Counter(DriverName + ".failure.convertvalue.boolean").Inc(1)
-		r.tracer.Log(ErrorLevel, "boolean data error", zap.String("val", val))
+		r.tracer.Log(ErrorLevel, "boolean data error", slog.String("val", val))
 		return nil, fmt.Errorf("unknown value `%s` for boolean", val)
 	case "date", "time", "time with time zone", "timestamp", "timestamp with time zone":
 		vv, err := scanTime(val)
@@ -345,37 +472,27 @@ func (r *Rows) athenaTypeToGoType(columnInfo athenatypes.ColumnInfo, rawValue *s
 			r.tracer.Scope().Counter(DriverName + ".failure.convertvalue." +
 				"time").Inc(1)
 			r.tracer.Log(ErrorLevel, "time data error",
-				zap.String("val", val),
-				zap.String("type", *columnInfo.Type))
+				slog.String("val", val),
+				slog.String("type", *columnInfo.Type))
 			return nil, err
 		}
 		return vv.Time, err
 	default:
 		r.tracer.Scope().Counter(DriverName + ".failure.convertvalue.type").Inc(1)
-		r.tracer.Log(ErrorLevel, "column data type error", zap.String("columnInfo.Type", *columnInfo.Type))
+		r.tracer.Log(ErrorLevel, "column data type error", slog.String("columnInfo.Type", *columnInfo.Type))
 		return nil, fmt.Errorf("unknown type `%s` with value %s", *columnInfo.Type, val)
 	}
 }
 
-// getDefaultValueForColumnType is used internally by athenaTypeToGoType to get default value for a column type.
-// This is helpful when column has missing value and we want to display it anyway.
-func (r *Rows) getDefaultValueForColumnType(athenaType string) interface{} {
-	switch athenaType {
-	case "tinyint", "smallint", "integer", "bigint":
-		return 0
-	case "boolean":
-		return false
-	case "float", "double", "real":
-		return 0.0
-	case "date", "time", "time with time zone", "timestamp", "timestamp with time zone":
-		return time.Time{}
-	case "json", "char", "varchar", "varbinary", "row", "string", "binary",
-		"struct", "interval year to month", "interval day to second", "decimal",
-		"ipaddress", "array", "map", "unknown":
-		return ""
-	default:
-		r.tracer.Scope().Counter(DriverName + ".failure.defaultvalueforcolumntype.type").Inc(1)
-		r.tracer.Log(ErrorLevel, "column data type error", zap.String("columnInfo.Type", athenaType))
-		return ""
+// getDefaultValueForColumnType is used internally by athenaTypeToGoType to
+// get default value for a column type when the row has no value for it and
+// MissingAsDefault is enabled. Unknown types log + meter and fall back to
+// the empty string.
+func (r *Rows) getDefaultValueForColumnType(athenaType string) any {
+	if meta, ok := athenaTypes[athenaType]; ok {
+		return meta.defaultVal
 	}
+	r.tracer.Scope().Counter(DriverName + ".failure.defaultvalueforcolumntype.type").Inc(1)
+	r.tracer.Log(ErrorLevel, "column data type error", slog.String("columnInfo.Type", athenaType))
+	return ""
 }

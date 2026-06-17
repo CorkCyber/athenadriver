@@ -1,80 +1,63 @@
 # Contributing
 
-We'd love your help to improve athenadriver!
+PRs and issues are welcome. Please [open an issue][open-issue] first if
+you're proposing a non-trivial change, so we can agree on the approach
+before code lands.
 
-Please [open an issue][open-issue] describing your proposal, idea and findings.
-In your issue, pull request, and any other communications,
-please remember to treat your fellow contributors with RESPECT!
-We take our [code of conduct](CODE_OF_CONDUCT.md) seriously.
-
-Note that you'll need to sign [Uber's Contributor License Agreement][cla]
-before we can accept any of your contributions. If necessary, a bot will remind
-you to accept the CLA when you open your pull request.
+Treat fellow contributors with respect; see the
+[code of conduct](CODE_OF_CONDUCT.md).
 
 ## Setup
 
-[Fork][fork], then clone the repository:
+[Fork][fork] the repo, then clone your fork:
 
-```
-mkdir -p $GOPATH/src/uber
-cd $GOPATH/src/uber
+```bash
 git clone git@github.com:your_github_username/athenadriver.git
 cd athenadriver
-git remote add upstream https://github.com/uber/athenadriver.git
+git remote add upstream https://github.com/CorkCyber/athenadriver.git
 git fetch upstream
 ```
 
-Install athenadriver's dependencies:
+The repository is three Go modules:
 
+- `./` — the driver (`./go/...`)
+- `./athenareader` — CLI tool
+- `./examples` — runnable example programs
+
+Run the unit + race tests:
+
+```bash
+make test           # driver tests with -race
+make lint           # go vet + gofmt -s
+make cover          # writes cover.out and cover.html
 ```
-make dependencies
+
+To exercise the CLI or examples build:
+
+```bash
+make athenareader   # builds the CLI module
+make examples       # builds every example
 ```
 
-Make sure that the tests and the linters pass:
+## Making changes
 
-```
-make test
-make lint
-```
-
-If you're not using the minor version of Go specified in the Makefile's
-`LINTABLE_MINOR_VERSIONS` variable, `make lint` doesn't do anything. This is
-fine, but it means that you'll only discover lint failures after you open your
-pull request.
-
-## Making Changes
-
-Start by creating a new branch for your changes:
-
-```
-cd $GOPATH/src/uber/athenadriver
+```bash
 git checkout master
 git fetch upstream
 git rebase upstream/master
-git checkout -b cool_new_feature
+git checkout -b your_branch_name
 ```
 
-Make your changes, then ensure that `make lint` and `make test` still pass. If
-you're satisfied with your changes, push them to your fork.
+Make your changes; keep `make test` and `make lint` clean. Push to
+your fork and open a PR via GitHub.
 
-```
-git push origin cool_new_feature
-```
+We're much more likely to merge your PR if you:
 
-Then use the GitHub UI to open a pull request.
+- add tests for new behavior;
+- write a [good commit message][commit-message];
+- keep backwards compatibility where reasonable, and call out
+  intentional breaks in the PR description and CHANGELOG.
 
-At this point, you're waiting on us to review your changes. We *try* to respond
-to issues and pull requests within a few business days, and we may suggest some
-improvements or alternatives. Once your changes are approved, one of the
-project maintainers will merge them.
-
-We're much more likely to approve your changes if you:
-
-* Add tests for new functionality.
-* Write a [good commit message][commit-message].
-* Maintain backward compatibility.
-
-[fork]: https://github.com/uber/athenadriver/fork
-[open-issue]: https://github.com/uber/athenadriver/issues/new
-[cla]: https://cla-assistant.io/uber/athenadriver
+[fork]: https://github.com/CorkCyber/athenadriver/fork
+[open-issue]: https://github.com/CorkCyber/athenadriver/issues/new
 [commit-message]: http://tbaggery.com/2008/04/19/a-note-about-git-commit-messages.html

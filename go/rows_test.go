@@ -1,22 +1,4 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 package athenadriver
 
@@ -176,7 +158,7 @@ func TestMultiplePages(t *testing.T) {
 		}
 	}
 	var dest []driver.Value = make([]driver.Value, 8)
-	assert.Equal(t, r.Next(dest), io.EOF)
+	assert.Equal(t, io.EOF, r.Next(dest))
 }
 
 func TestRows_Columns(t *testing.T) {
@@ -251,21 +233,21 @@ func TestRows_GetDefaultValueForColumnType(t *testing.T) {
 			test.queryID,
 			testConf, NewDefaultObservability(testConf))
 		for _, v := range []string{"tinyint", "smallint", "integer", "bigint"} {
-			assert.Equal(t, r.getDefaultValueForColumnType(v), 0)
+			assert.Equal(t, 0, r.getDefaultValueForColumnType(v))
 		}
 		for _, v := range []string{"json", "char", "varchar", "varbinary", "row", "string", "binary",
 			"struct", "interval year to month", "interval day to second", "decimal",
 			"ipaddress", "array", "map", "unknown"} {
-			assert.Equal(t, r.getDefaultValueForColumnType(v), "")
+			assert.Equal(t, "", r.getDefaultValueForColumnType(v))
 		}
 		for _, v := range []string{"float", "double", "real"} {
-			assert.Equal(t, r.getDefaultValueForColumnType(v), 0.0)
+			assert.Equal(t, 0.0, r.getDefaultValueForColumnType(v))
 		}
 		for _, v := range []string{"date", "time", "time with time zone", "timestamp", "timestamp with time zone"} {
 			assert.Equal(t, r.getDefaultValueForColumnType(v), time.Time{})
 		}
-		assert.Equal(t, r.getDefaultValueForColumnType("boolean"), false)
-		assert.Equal(t, r.getDefaultValueForColumnType("XXX"), "")
+		assert.Equal(t, false, r.getDefaultValueForColumnType("boolean"))
+		assert.Equal(t, "", r.getDefaultValueForColumnType("XXX"))
 	}
 }
 
@@ -389,14 +371,14 @@ func TestRows_AthenaTypeToGoType(t *testing.T) {
 	}
 
 	// date and time
-	now := time.Now()
+	_ = time.Now()
 	for _, s := range []string{"date", "time", "time with time zone",
 		"timestamp", "timestamp with time zone"} {
 		c = newColumnInfo("a", s)
 		rv = "2020-01-20"
 		g, e = r.athenaTypeToGoType(c, &rv, testConf)
 		assert.Nil(t, e)
-		assert.Equal(t, reflect.TypeOf(now), reflect.TypeOf(g))
+		assert.Equal(t, reflect.TypeFor[time.Time](), reflect.TypeOf(g))
 
 		rv = "x"
 		g, e = r.athenaTypeToGoType(c, &rv, testConf)
@@ -414,14 +396,14 @@ func TestRows_AthenaTypeToGoType(t *testing.T) {
 	c = newColumnInfo("a", "integer")
 	g, e = r.athenaTypeToGoType(c, nil, testConf)
 	assert.Nil(t, e)
-	assert.Equal(t, g, "")
+	assert.Equal(t, "", g)
 
 	testConf.SetMissingAsEmptyString(false)
 	testConf.SetMissingAsDefault(true)
 	testConf.SetMissingAsNil(false)
 	g, e = r.athenaTypeToGoType(c, nil, testConf)
 	assert.Nil(t, e)
-	assert.Equal(t, g, 0)
+	assert.Equal(t, 0, g)
 
 	testConf.SetMissingAsEmptyString(false)
 	testConf.SetMissingAsDefault(false)
@@ -441,7 +423,7 @@ func TestRows_AthenaTypeToGoType(t *testing.T) {
 	testConf.SetMaskedColumnValue("a", "xxx")
 	g, e = r.athenaTypeToGoType(c, nil, testConf)
 	assert.Nil(t, e)
-	assert.Equal(t, g, "xxx")
+	assert.Equal(t, "xxx", g)
 }
 
 func TestRows_ColumnTypeDatabaseTypeName2(t *testing.T) {
@@ -459,7 +441,7 @@ func TestRows_ColumnTypeDatabaseTypeName2(t *testing.T) {
 		},
 	}
 	r.ResultOutput = getQueryResultsOutput
-	assert.Equal(t, r.ColumnTypeDatabaseTypeName(0), "")
+	assert.Equal(t, "", r.ColumnTypeDatabaseTypeName(0))
 }
 
 func TestRows_NewRows(t *testing.T) {
@@ -503,7 +485,7 @@ func TestRows_NewRows(t *testing.T) {
 	assert.NotNil(t, r)
 	var dest []driver.Value = make([]driver.Value, 8)
 	e = r.Next(dest)
-	assert.Equal(t, e, nil)
+	assert.Equal(t, nil, e)
 
 	// raise error for missing value
 	testConf.SetMissingAsEmptyString(false)
@@ -514,7 +496,7 @@ func TestRows_NewRows(t *testing.T) {
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
 	e = r.Next(dest)
-	assert.Equal(t, e.Error(), "Missing data at column c1")
+	assert.Equal(t, "missing data at column c1", e.Error())
 
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"missing_data_resp2",
@@ -533,7 +515,7 @@ func TestRows_NewRows(t *testing.T) {
 	for {
 		e = r.Next(dest)
 		if e != nil {
-			assert.Equal(t, e, ErrTestMockGeneric)
+			assert.Equal(t, ErrTestMockGeneric, e)
 			break
 		}
 	}
@@ -547,7 +529,7 @@ func TestRows_NewRows(t *testing.T) {
 	for {
 		e = r.Next(dest)
 		if e != nil {
-			assert.Equal(t, e, io.EOF)
+			assert.Equal(t, io.EOF, e)
 			break
 		}
 	}
@@ -562,7 +544,7 @@ func TestRows_NewRows(t *testing.T) {
 	for {
 		e = r.Next(dest)
 		if e != nil {
-			assert.Equal(t, e, io.EOF)
+			assert.Equal(t, io.EOF, e)
 			break
 		}
 		if cnt == 7 {

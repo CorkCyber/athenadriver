@@ -1,22 +1,4 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 package athenadriver
 
@@ -26,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 )
 
 // Config is for AWS Athena Driver Config.
@@ -55,9 +39,6 @@ var (
 	regionEnvKeys = []string{
 		"AWS_REGION",
 		"AWS_DEFAULT_REGION", // Only read if AWS_SDK_LOAD_CONFIG is also set
-	}
-	stsRegionalEndpointKey = []string{
-		"AWS_STS_REGIONAL_ENDPOINTS",
 	}
 )
 
@@ -194,6 +175,64 @@ func (c *Config) GetDB() string {
 	return DefaultDBName
 }
 
+// SetResultEncryption sets the default S3 server-side encryption applied to
+// query results written to OutputLocation. Pass `option =
+// athenatypes.EncryptionOptionSseS3` for SSE-S3 (no kmsKey needed); for
+// SSE-KMS or CSE-KMS supply the KMS key ARN or ID. Per-query override is
+// available via context with ResultEncryptionKey (or WithResultEncryption).
+func (c *Config) SetResultEncryption(option athenatypes.EncryptionOption, kmsKey string) {
+	c.values.Set("resultEncryptionOption", string(option))
+	if kmsKey != "" {
+		c.values.Set("resultEncryptionKmsKey", kmsKey)
+	} else {
+		c.values.Del("resultEncryptionKmsKey")
+	}
+}
+
+// GetResultEncryption returns the configured ResultConfiguration encryption,
+// or nil if none is set on this Config.
+func (c *Config) GetResultEncryption() *athenatypes.EncryptionConfiguration {
+	opt := c.values.Get("resultEncryptionOption")
+	if opt == "" {
+		return nil
+	}
+	enc := &athenatypes.EncryptionConfiguration{
+		EncryptionOption: athenatypes.EncryptionOption(opt),
+	}
+	if k := c.values.Get("resultEncryptionKmsKey"); k != "" {
+		enc.KmsKey = &k
+	}
+	return enc
+}
+
+// SetExpectedBucketOwner sets the AWS account ID expected to own the S3
+// bucket referenced by OutputLocation. If the live bucket owner differs at
+// query time, Athena fails the request — a cross-account safety net.
+func (c *Config) SetExpectedBucketOwner(accountID string) {
+	c.values.Set("expectedBucketOwner", accountID)
+}
+
+// GetExpectedBucketOwner returns the configured expected S3 bucket owner,
+// or "" if none is set.
+func (c *Config) GetExpectedBucketOwner() string {
+	return c.values.Get("expectedBucketOwner")
+}
+
+// SetCatalog sets the default Athena data catalog used by this Config.
+// Per-query override is available via context with CatalogKey.
+func (c *Config) SetCatalog(o string) {
+	c.values.Set("catalog", o)
+}
+
+// GetCatalog returns the configured Athena data catalog, falling back to
+// DefaultCatalog (AwsDataCatalog) when unset.
+func (c *Config) GetCatalog() string {
+	if val := c.values.Get("catalog"); val != "" {
+		return val
+	}
+	return DefaultCatalog
+}
+
 // SetResultPollIntervalSeconds is a setter of Overriding poll interval.
 func (c *Config) SetResultPollIntervalSeconds(n int) {
 	c.values.Set("resultPollIntervalSeconds", strconv.Itoa(n))
@@ -211,6 +250,51 @@ func (c *Config) GetResultPollIntervalSeconds() time.Duration {
 	return time.Duration(PoolInterval) * time.Second
 }
 
+// SetResultPollBackoff configures exponential backoff between
+// GetQueryExecution polls. The poll interval starts at the value set by
+// SetResultPollIntervalSeconds and is multiplied by multiplier after each
+// poll, capped at maxInterval. A multiplier of 1.0 (the default) disables
+// backoff and uses the initial interval forever. maxInterval below the
+// initial interval is treated as "no growth".
+func (c *Config) SetResultPollBackoff(multiplier float64, maxInterval time.Duration) {
+	if multiplier > 1 {
+		c.values.Set("resultPollBackoffMultiplier", strconv.FormatFloat(multiplier, 'f', -1, 64))
+	} else {
+		c.values.Del("resultPollBackoffMultiplier")
+	}
+	if maxInterval > 0 {
+		c.values.Set("resultPollMaxIntervalSeconds", strconv.Itoa(int(maxInterval.Seconds())))
+	} else {
+		c.values.Del("resultPollMaxIntervalSeconds")
+	}
+}
+
+// GetResultPollBackoffMultiplier returns the per-poll multiplier; 1.0
+// means "no backoff".
+func (c *Config) GetResultPollBackoffMultiplier() float64 {
+	val := c.values.Get("resultPollBackoffMultiplier")
+	if val == "" {
+		return 1.0
+	}
+	if n, err := strconv.ParseFloat(val, 64); err == nil && n > 1 {
+		return n
+	}
+	return 1.0
+}
+
+// GetResultPollMaxInterval returns the cap on the per-poll wait, or the
+// initial poll interval when no cap is set.
+func (c *Config) GetResultPollMaxInterval() time.Duration {
+	val := c.values.Get("resultPollMaxIntervalSeconds")
+	if val == "" {
+		return c.GetResultPollIntervalSeconds()
+	}
+	if n, err := strconv.Atoi(val); err == nil && n > 0 {
+		return time.Duration(n) * time.Second
+	}
+	return c.GetResultPollIntervalSeconds()
+}
+
 // SetWorkGroup is a setter of WorkGroup.
 func (c *Config) SetWorkGroup(w *Workgroup) error {
 	if w == nil {
@@ -218,18 +302,16 @@ func (c *Config) SetWorkGroup(w *Workgroup) error {
 	}
 	c.values.Set("workgroupName", w.Name)
 	if w.Tags != nil {
-		tagsString := c.values.Get("tag")
+		var tagsString strings.Builder
+		tagsString.WriteString(c.values.Get("tag"))
 		for _, tag := range w.Tags.Get() {
-			tagsString += "|" + *tag.Key + "`" + *tag.Value
+			tagsString.WriteString("|" + *tag.Key + "`" + *tag.Value)
 		}
-		c.values.Set("tag", tagsString)
+		c.values.Set("tag", tagsString.String())
 	}
 	if w.Config == nil {
 		w.Config = GetDefaultWGConfig()
 	}
-	// FIXME: this String() method has been removed and the Prettify method it calls is aws-sdk-go-v2/internal
-	//c.values.Set("workgroupConfig", w.Config.String())
-	c.values.Set("workgroupConfig", Prettify(w.Config))
 	return nil
 }
 
@@ -445,6 +527,31 @@ func (c *Config) SetMoneyWise(b bool) {
 // IsMoneyWise is to check if we are in the moneywise mode
 func (c *Config) IsMoneyWise() bool {
 	return c.values.Get("MoneyWise") == "true"
+}
+
+// SetWebIdentity configures AssumeRoleWithWebIdentity credential
+// resolution. tokenFile is the path the SDK will read on each refresh
+// (matches AWS_WEB_IDENTITY_TOKEN_FILE); roleSessionName may be empty.
+// All three values round-trip through the DSN. When roleARN and
+// tokenFile are both set, resolveAWSConfig builds a
+// stscreds.NewWebIdentityRoleProvider and skips the other DSN credential
+// paths.
+func (c *Config) SetWebIdentity(roleARN, tokenFile, roleSessionName string) {
+	c.values.Set("webIdentityRoleARN", roleARN)
+	c.values.Set("webIdentityTokenFile", tokenFile)
+	if roleSessionName != "" {
+		c.values.Set("webIdentityRoleSessionName", roleSessionName)
+	} else {
+		c.values.Del("webIdentityRoleSessionName")
+	}
+}
+
+// GetWebIdentity returns the configured roleARN, tokenFile,
+// roleSessionName triple. Empty strings mean unset.
+func (c *Config) GetWebIdentity() (roleARN, tokenFile, roleSessionName string) {
+	return c.values.Get("webIdentityRoleARN"),
+		c.values.Get("webIdentityTokenFile"),
+		c.values.Get("webIdentityRoleSessionName")
 }
 
 // SetAWSProfile is to manually set the credential provider

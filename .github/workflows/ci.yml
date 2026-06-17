@@ -1,0 +1,111 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main, "athenadriver-*"]
+  pull_request:
+    branches: [master, main]
+
+permissions:
+  contents: read
+
+jobs:
+  driver:
+    name: driver (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.22 = declared floor in go.mod; 1.25 + 1.26 = latest two releases.
+        go: ["1.22", "1.25", "1.26"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+          cache-dependency-path: go.sum
+      - name: go vet
+        run: go vet ./go/... ./examples/...
+      - name: gofmt
+        run: |
+          fmt_out="$(gofmt -d -s ./go ./examples ./scope)"
+          if [ -n "$fmt_out" ]; then
+            echo "$fmt_out"
+            echo "::error::gofmt -s found unformatted files; run 'gofmt -s -w'"
+            exit 1
+          fi
+      - name: examples build
+        run: go build ./examples/...
+      - name: go test
+        run: go test -race -coverprofile=coverage.out -coverpkg=./go/... ./go/...
+      - name: upload coverage
+        if: matrix.go == '1.26'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          fail_ci_if_error: false
+
+  athenareader:
+    name: athenareader CLI
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: athenareader/go.sum
+      - name: build
+        working-directory: athenareader
+        run: go build ./...
+      - name: vet
+        working-directory: athenareader
+        run: go vet ./...
+      - name: test
+        working-directory: athenareader
+        run: go test -race ./...
+
+  examples:
+    name: examples
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: examples/go.sum
+      - name: build
+        working-directory: examples
+        run: go build ./...
+      - name: vet
+        working-directory: examples
+        run: go vet ./...
+      - name: test
+        working-directory: examples
+        run: go test -race ./...
+
+  scope:
+    name: scope adapter (${{ matrix.adapter }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        adapter: [otel, tally, statsd]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+          cache-dependency-path: scope/${{ matrix.adapter }}/go.sum
+      - name: build
+        working-directory: scope/${{ matrix.adapter }}
+        run: go build ./...
+      - name: vet
+        working-directory: scope/${{ matrix.adapter }}
+        run: go vet ./...
+      - name: test
+        working-directory: scope/${{ matrix.adapter }}
+        run: go test -race ./...

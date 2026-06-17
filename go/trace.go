@@ -1,100 +1,80 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 package athenadriver
 
 import (
+	"context"
+	"io"
+	"log/slog"
+
 	"github.com/uber-go/tally/v4"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
+// Logging level re-exports so callers do not need to import log/slog
+// separately. Aligned with slog.Level values.
 const (
-	// DebugLevel logs are typically voluminous, and are usually disabled in
-	// production.
-	DebugLevel = zap.DebugLevel
-	// InfoLevel is the default logging priority.
-	InfoLevel = zap.InfoLevel
-	// WarnLevel logs are more important than Info, but don't need individual
-	// human review.
-	WarnLevel = zap.WarnLevel
-	// ErrorLevel logs are high-priority. If an application is running smoothly,
-	// it shouldn't generate any error-level logs.
-	// DPanicLevel, PanicLevel and FatalLevel are not allowed in this package
-	// to avoid terminating the whole process
-	ErrorLevel = zap.ErrorLevel
+	DebugLevel = slog.LevelDebug
+	InfoLevel  = slog.LevelInfo
+	WarnLevel  = slog.LevelWarn
+	ErrorLevel = slog.LevelError
 )
 
-// DriverTracer is supported in athenadriver builtin.
+// discardLogger drops all records; the default logger when none is
+// supplied via NewObservability / context.
+var discardLogger = slog.New(slog.NewTextHandler(io.Discard, nil))
+
+// DriverTracer wraps the slog logger + tally metrics scope used across the
+// driver so call sites can fire structured logs and counters without
+// branching on whether either is enabled.
 type DriverTracer struct {
-	logger *zap.Logger
+	logger *slog.Logger
 	scope  tally.Scope
 	config *Config
 }
 
-// NewObservability is to create an observability object.
-func NewObservability(config *Config, logger *zap.Logger,
-	scope tally.Scope) *DriverTracer {
-	o := DriverTracer{
-		logger: logger,
-		scope:  scope,
-		config: config,
+// NewObservability builds a tracer with the supplied logger and metrics
+// scope. Either may be nil; in that case the discard logger / noop scope
+// is used.
+func NewObservability(config *Config, logger *slog.Logger, scope tally.Scope) *DriverTracer {
+	if logger == nil {
+		logger = discardLogger
 	}
-	return &o
+	if scope == nil {
+		scope = tally.NoopScope
+	}
+	return &DriverTracer{logger: logger, scope: scope, config: config}
 }
 
-// NewDefaultObservability is to create an observability object with logger
-// and scope as default(noops object).
+// NewDefaultObservability returns a tracer that discards logs and uses the
+// tally noop scope. Used when no observability values are supplied via
+// context or constructor.
 func NewDefaultObservability(config *Config) *DriverTracer {
-	o := DriverTracer{
-		logger: zap.NewNop(),
-		scope:  tally.NoopScope,
-		config: config,
-	}
-	return &o
+	return &DriverTracer{logger: discardLogger, scope: tally.NoopScope, config: config}
 }
 
 // NewNoOpsObservability is for testing purpose.
 func NewNoOpsObservability() *DriverTracer {
-	o := DriverTracer{
-		logger: zap.NewNop(),
-		scope:  tally.NoopScope,
-		config: NewNoOpsConfig(),
-	}
-	return &o
+	return &DriverTracer{logger: discardLogger, scope: tally.NoopScope, config: NewNoOpsConfig()}
 }
 
-// Logger is a getter of logger.
-func (c *DriverTracer) Logger() *zap.Logger {
+// Logger returns the slog logger, or a discard logger if logging is
+// disabled in Config.
+func (c *DriverTracer) Logger() *slog.Logger {
 	if !c.config.IsLoggingEnabled() {
-		return zap.NewNop()
+		return discardLogger
 	}
 	return c.logger
 }
 
-// SetLogger is a setter of logger.
-func (c *DriverTracer) SetLogger(logger *zap.Logger) {
+// SetLogger replaces the underlying slog logger.
+func (c *DriverTracer) SetLogger(logger *slog.Logger) {
+	if logger == nil {
+		logger = discardLogger
+	}
 	c.logger = logger
 }
 
-// Scope is a getter of tally.Scope.
+// Scope returns the tally scope, or noop if metrics are disabled in Config.
 func (c *DriverTracer) Scope() tally.Scope {
 	if !c.config.IsMetricsEnabled() {
 		return tally.NoopScope
@@ -102,31 +82,17 @@ func (c *DriverTracer) Scope() tally.Scope {
 	return c.scope
 }
 
-// SetScope is a setter of tally.Scope.
+// SetScope replaces the underlying tally scope.
 func (c *DriverTracer) SetScope(scope tally.Scope) {
 	c.scope = scope
 }
 
-// Config is to get c.config
-func (c *DriverTracer) Config() *Config {
-	return c.config
-}
-
-// Log is to log with zap.logger with 4 logging levels.
-// We threw away the panic and fatal level as we don't want to DB error terminates the whole process.
-func (c *DriverTracer) Log(lvl zapcore.Level, msg string, fields ...zap.Field) {
+// Log fires a structured log record at the given slog level. Panic / fatal
+// levels intentionally have no analogue; the driver never wants a DB error
+// to terminate the host process.
+func (c *DriverTracer) Log(lvl slog.Level, msg string, attrs ...slog.Attr) {
 	if !c.config.IsLoggingEnabled() {
 		return
 	}
-	switch lvl {
-	case DebugLevel:
-		c.logger.Debug(msg, fields...)
-	case WarnLevel:
-		c.logger.Warn(msg, fields...)
-	case InfoLevel:
-		c.logger.Info(msg, fields...)
-	case ErrorLevel, zap.DPanicLevel, zap.PanicLevel, zap.FatalLevel:
-		c.logger.Error(msg, fields...)
-
-	}
+	c.logger.LogAttrs(context.Background(), lvl, msg, attrs...)
 }

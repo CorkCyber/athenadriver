@@ -1,50 +1,26 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 package athenadriver
 
 import (
+	"github.com/aws/aws-sdk-go-v2/aws"
 	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 )
 
-// WGConfig wraps WorkGroupConfiguration.
-type WGConfig struct {
-	wgConfig *athenatypes.WorkGroupConfiguration
-}
-
-// GetDefaultWGConfig to create a default WorkGroupConfiguration.
+// GetDefaultWGConfig returns a WorkGroupConfiguration with a 1 GiB scan
+// cap, workgroup enforcement on, CloudWatch metrics on, and
+// requester-pays off.
 func GetDefaultWGConfig() *athenatypes.WorkGroupConfiguration {
-	var bytesScannedCutoffPerQuery int64 = DefaultBytesScannedCutoffPerQuery
-	var enforceWorkGroupConfiguration bool = true
-	var publishCloudWatchMetricsEnabled bool = true
-	var requesterPaysEnabled bool = false
 	return &athenatypes.WorkGroupConfiguration{
-		BytesScannedCutoffPerQuery:      &bytesScannedCutoffPerQuery, // 1G by default
-		EnforceWorkGroupConfiguration:   &enforceWorkGroupConfiguration,
-		PublishCloudWatchMetricsEnabled: &publishCloudWatchMetricsEnabled,
-		RequesterPaysEnabled:            &requesterPaysEnabled,
-		ResultConfiguration:             nil,
+		BytesScannedCutoffPerQuery:      aws.Int64(DefaultBytesScannedCutoffPerQuery),
+		EnforceWorkGroupConfiguration:   aws.Bool(true),
+		PublishCloudWatchMetricsEnabled: aws.Bool(true),
+		RequesterPaysEnabled:            aws.Bool(false),
 	}
 }
 
-// NewWGConfig to create a WorkGroupConfiguration.
+// NewWGConfig builds a WorkGroupConfiguration from explicit field
+// values. Use GetDefaultWGConfig for the recommended defaults.
 func NewWGConfig(bytesScannedCutoffPerQuery int64,
 	enforceWorkGroupConfiguration bool,
 	publishCloudWatchMetricsEnabled bool,

@@ -1,22 +1,4 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 package athenadriver
 
@@ -39,72 +21,83 @@ var regions = []string{"ap-east-1", "eu-central-1", "eu-north-1", "eu-west-1", "
 	"ca-central-1", "us-east-2", "ap-south-1", "ap-southeast-2", "us-west-2",
 }
 
-func TestReadOnlyCTAS1(t *testing.T) {
-	testConf := NewNoOpsConfig()
-	testConf.SetReadOnly(true)
-	dsn := testConf.Stringify()
-	db, _ := sql.Open(DriverName, dsn)
-	_, err := db.QueryContext(context.Background(), "CREATE TABLE sampledb."+
-		"elb_logs_new AS "+
-		"SELECT * FROM sampledb.elb_logs limit 10;")
-	assert.NotNil(t, err)
-	assert.Equal(t, err.Error(), "writing to Athena database is disallowed in read-only mode")
+// newTestConnWithWG builds a *Connection wired to a fresh mock client
+// and a Config preset with the "henry_wu" workgroup, us-east-1 region,
+// and a fake S3 bucket. Optional mutators tweak the config or mock for
+// each test.
+func newTestConnWithWG(mut ...func(*Config, *mockAthenaClient)) *Connection {
+	nm := newMockAthenaClient()
+	cfg := NewNoOpsConfig()
+	_ = cfg.SetOutputBucket("s3://fake-query-results-arbitrary-bucket/")
+	_ = cfg.SetRegion("us-east-1")
+	cfg.SetUser("henry.wu")
+	cfg.SetDB("default")
 
-	query := randString(MAXQueryStringLength*10) + "?"
-	args := []driver.Value{query}
-	r, err := db.ExecContext(context.Background(), query, args)
-	assert.NotNil(t, err)
-	assert.Equal(t, r, nil)
+	wgTags := NewWGTags()
+	wgTags.AddTag("Uber User", "henry.wu")
+	wgTags.AddTag("Uber Asset", "abc.efg")
+	_ = cfg.SetWorkGroup(NewWG("henry_wu", nil, wgTags))
 
-	r, err = db.ExecContext(context.Background(), query, "")
-	assert.NotNil(t, err)
-	assert.Equal(t, r, nil)
+	for _, m := range mut {
+		m(cfg, nm)
+	}
 
-	r, err = db.ExecContext(context.Background(), query)
-	assert.NotNil(t, err)
-	assert.Equal(t, r, nil)
-
-	query = "?"
-	r, err = db.ExecContext(context.Background(), query, "")
-	assert.NotNil(t, err)
-	assert.Equal(t, r, nil)
-
-	e := db.Ping()
-	assert.NotNil(t, e)
+	c := &Connection{
+		athenaClient: nm,
+		connector:    NoopsSQLConnector(),
+	}
+	c.connector.config = cfg
+	return c
 }
 
-func TestReadOnlyCTAS2(t *testing.T) {
+func TestReadOnly_WriteRejection(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	testConf.SetReadOnly(true)
-	dsn := testConf.Stringify()
-	db, _ := sql.Open(DriverName, dsn)
-	_, err := db.QueryContext(context.Background(), " CREATE TABLE sampledb."+
-		"elb_logs_new AS "+
-		"SELECT * FROM sampledb.elb_logs limit 10;")
-	assert.NotNil(t, err)
-	assert.Equal(t, err.Error(), "writing to Athena database is disallowed in read-only mode")
-}
+	db, _ := sql.Open(DriverName, testConf.Stringify())
+	const wantErr = "writing to Athena database is disallowed in read-only mode"
 
-func TestReadOnlyCTAS3(t *testing.T) {
-	testConf := NewNoOpsConfig()
-	testConf.SetReadOnly(true)
-	dsn := testConf.Stringify()
-	db, _ := sql.Open(DriverName, dsn)
-	_, err := db.QueryContext(context.Background(), " cReate TABLE sampledb."+
-		"elb_logs_new AS "+
-		"SELECT * FROM sampledb.elb_logs limit 10;")
-	assert.NotNil(t, err)
-	assert.Equal(t, err.Error(), "writing to Athena database is disallowed in read-only mode")
-}
+	cases := []struct {
+		name, query string
+	}{
+		{"CTAS uppercase", "CREATE TABLE sampledb.elb_logs_new AS SELECT * FROM sampledb.elb_logs limit 10;"},
+		{"CTAS leading space + upper", " CREATE TABLE sampledb.elb_logs_new AS SELECT * FROM sampledb.elb_logs limit 10;"},
+		{"CTAS mixed case", " cReate TABLE sampledb.elb_logs_new AS SELECT * FROM sampledb.elb_logs limit 10;"},
+		{"DROP", " drop table test"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := db.QueryContext(context.Background(), tc.query)
+			assert.EqualError(t, err, wantErr)
+		})
+	}
 
-func TestReadOnlyDROP(t *testing.T) {
-	testConf := NewNoOpsConfig()
-	testConf.SetReadOnly(true)
-	dsn := testConf.Stringify()
-	db, _ := sql.Open(DriverName, dsn)
-	_, err := db.QueryContext(context.Background(), " drop table test")
-	assert.NotNil(t, err)
-	assert.Equal(t, err.Error(), "writing to Athena database is disallowed in read-only mode")
+	// Pathological / invalid queries are also rejected by ExecContext +
+	// Ping under read-only mode.
+	t.Run("oversize query with args", func(t *testing.T) {
+		query := randString(MAXQueryStringLength*10) + "?"
+		args := []driver.Value{query}
+		r, err := db.ExecContext(context.Background(), query, args)
+		assert.NotNil(t, err)
+		assert.Nil(t, r)
+
+		r, err = db.ExecContext(context.Background(), query, "")
+		assert.NotNil(t, err)
+		assert.Nil(t, r)
+
+		r, err = db.ExecContext(context.Background(), query)
+		assert.NotNil(t, err)
+		assert.Nil(t, r)
+	})
+
+	t.Run("standalone placeholder", func(t *testing.T) {
+		r, err := db.ExecContext(context.Background(), "?", "")
+		assert.NotNil(t, err)
+		assert.Nil(t, r)
+	})
+
+	t.Run("ping under read-only", func(t *testing.T) {
+		assert.NotNil(t, db.Ping())
+	})
 }
 
 func TestConnection_Prepare(t *testing.T) {
@@ -127,21 +120,6 @@ func TestConnection_Prepare(t *testing.T) {
 	assert.Nil(t, prepStatement)
 }
 
-func TestConnection_Begin(t *testing.T) {
-	testConf := NewNoOpsConfig()
-	connector := &SQLConnector{
-		config: testConf,
-		tracer: NewDefaultObservability(testConf),
-	}
-
-	conn, err := connector.Connect(context.Background())
-	assert.Nil(t, err)
-	assert.NotNil(t, conn)
-	transaction, err := conn.Begin()
-	assert.Nil(t, transaction)
-	assert.Equal(t, err.Error(), "Athena doesn't support transaction statements")
-}
-
 func TestConnection_Close(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
@@ -156,37 +134,25 @@ func TestConnection_Close(t *testing.T) {
 
 }
 
-func TestConnection_QueryContext(t *testing.T) {
-	testConf := NewNoOpsConfig()
-	connector := &SQLConnector{
-		config: testConf,
-		tracer: NewDefaultObservability(testConf),
-	}
-
-	conn, err := connector.Connect(context.Background())
-	assert.Nil(t, err)
-	assert.NotNil(t, conn)
-}
-
-func TestConnection_BeginTx(t *testing.T) {
+func TestConnection_BeginAndBeginTx(t *testing.T) {
 	c := createTestConnection(t)
-	value := driver.NamedValue{Value: uint64(0)}
-	err := c.CheckNamedValue(&value)
-	if err != nil {
-		t.Fatal("uint64 not convertible", err)
-	}
-	tx, err := c.BeginTx(context.Background(),
-		&sql.TxOptions{Isolation: sql.
-			LevelSerializable})
+	const wantErr = "Athena doesn't support transaction statements"
+
+	tx, err := c.Begin()
 	assert.Nil(t, tx)
-	assert.Equal(t, err.Error(), "Athena doesn't support transaction statements")
+	assert.EqualError(t, err, wantErr)
+
+	txCtx, err := c.BeginTx(context.Background(),
+		&sql.TxOptions{Isolation: sql.LevelSerializable})
+	assert.Nil(t, txCtx)
+	assert.EqualError(t, err, wantErr)
 }
 
 func TestConnection_Transaction(t *testing.T) {
 	db, _ := sql.Open(DriverName, NewNoOpsConfig().Stringify())
 	tx, err := db.BeginTx(context.Background(), &sql.TxOptions{Isolation: sql.LevelSerializable})
 	assert.Nil(t, tx)
-	assert.Equal(t, err.Error(), "sql: driver does not support non-default isolation level")
+	assert.Equal(t, "sql: driver does not support non-default isolation level", err.Error())
 }
 
 func TestConnection_InterpolateParams(t *testing.T) {
@@ -214,55 +180,55 @@ func TestConnection_InterpolateParams_Query(t *testing.T) {
 	c := createTestConnection(t)
 	query := randString(MAXQueryStringLength*10) + "?"
 	q, err := c.interpolateParams(query, []driver.Value{query})
-	assert.Equal(t, q, "")
+	assert.Equal(t, "", q)
 	assert.NotNil(t, err)
 }
 
 func TestConnection_InterpolateParams_Query2(t *testing.T) {
 	c := createTestConnection(t)
 	q, err := c.interpolateParams("?", []driver.Value{aType{S: "abc"}})
-	assert.Equal(t, q, "")
+	assert.Equal(t, "", q)
 	assert.NotNil(t, err)
 
 	q, err = c.interpolateParams("?", []driver.Value{1})
-	assert.Equal(t, q, "")
+	assert.Equal(t, "", q)
 	assert.NotNil(t, err)
 }
 
 func TestConnection_InterpolateParams_Bool(t *testing.T) {
 	c := createTestConnection(t)
 	q, err := c.interpolateParams("?", []driver.Value{true})
-	assert.Equal(t, q, "1")
+	assert.Equal(t, "1", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{false})
-	assert.Equal(t, q, "0")
+	assert.Equal(t, "0", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{int64(1)})
-	assert.Equal(t, q, "1")
+	assert.Equal(t, "1", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{uint64(1)})
-	assert.Equal(t, q, "1")
+	assert.Equal(t, "1", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{float64(1.1)})
-	assert.Equal(t, q, "1.1")
+	assert.Equal(t, "1.1", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{time.Time{}})
-	assert.Equal(t, q, "'0000-00-00'")
+	assert.Equal(t, "'0000-00-00'", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{time.Now()})
 	assert.NotEqual(t, q, "'0000-00-00'")
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{[]byte{'0'}})
-	assert.Equal(t, q, "_binary'0'")
+	assert.Equal(t, "_binary'0'", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{nil})
-	assert.Equal(t, q, "NULL")
+	assert.Equal(t, "NULL", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("123?4", []driver.Value{nil})
-	assert.Equal(t, q, "123NULL4")
+	assert.Equal(t, "123NULL4", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{time.Time{}.Add(1 * time.Nanosecond)})
-	assert.Equal(t, q, "'0001-01-01 00:00:00'")
+	assert.Equal(t, "'0001-01-01 00:00:00'", q)
 	assert.Nil(t, err)
 }
 
@@ -283,7 +249,7 @@ func TestInterpolateParamsUint64(t *testing.T) {
 
 	q, err := c.interpolateParams("SELECT ?", []driver.Value{uint64(42)})
 	assert.Nil(t, err)
-	assert.Equal(t, q, "SELECT 42")
+	assert.Equal(t, "SELECT 42", q)
 }
 
 func TestInterpolateParamsDateOnly(t *testing.T) {
@@ -331,10 +297,15 @@ func TestBuildExecutionParams(t *testing.T) {
 		expected    []string
 	}{
 		{
+			// buildExecutionParams must return a nil slice (not an empty
+			// slice) when there are no arguments, so the resulting
+			// StartQueryExecution call leaves ExecutionParameters unset.
+			// Athena rejects non-parameterized queries that carry an empty
+			// ExecutionParameters array.
 			name:        "No arguments",
 			inputArgs:   []driver.Value{},
 			expectedErr: nil,
-			expected:    []string{},
+			expected:    nil,
 		},
 		{
 			name:        "Bool",
@@ -411,7 +382,6 @@ func TestBuildExecutionParams(t *testing.T) {
 		// Pre-Go-1.22, the loop variable `tc` is shared between each loop iteration. Because t.Parallel() is called
 		// in createTestConnection(), the test cases run concurrently, and `tc` is likely to change mid-test. We can
 		// avoid that by creating a local copy.
-		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			actual, err := c.buildExecutionParams(tc.inputArgs)
 			assert.Equal(t, tc.expectedErr, err)
@@ -425,7 +395,7 @@ func TestCheckNamedValue(t *testing.T) {
 	value := driver.NamedValue{Value: uint64(0)}
 	err := c.CheckNamedValue(&value)
 	assert.Nil(t, err)
-	assert.Equal(t, value.Value, int64(0))
+	assert.Equal(t, int64(0), value.Value)
 }
 
 func createTestConnection(t *testing.T) *Connection {
@@ -460,135 +430,63 @@ func TestConnection_QueryContext2(t *testing.T) {
 	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateCancelled",
 		[]driver.NamedValue{})
 	assert.Nil(t, driverRows)
-	assert.Equal(t, err, context.Canceled)
+	assert.Equal(t, context.Canceled, err)
 
 	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateFailed",
 		[]driver.NamedValue{})
 	assert.Nil(t, driverRows)
-	assert.Equal(t, err, ErrTestMockFailedByAthena)
+	assert.Equal(t, ErrTestMockFailedByAthena, err)
 
 }
 
-func TestConnection_QueryContext3(t *testing.T) {
-	t.Parallel()
-	c := &Connection{
-		athenaClient: newMockAthenaClient(),
-		connector:    NoopsSQLConnector(),
+// TestConnection_QueryContext_WorkgroupVariants drives QueryContext with
+// the four workgroup-resolution permutations the driver has to handle:
+// remote-WG-unknown (default), remote-WG-found-and-enabled,
+// remote-WG-found-but-disabled, and remote-WG-creation-disallowed.
+// In every variant a bogus query is expected to surface an error.
+func TestConnection_QueryContext_WorkgroupVariants(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Config, *mockAthenaClient)
+		ping   error // expected db.Ping result; nil to skip the Ping check
+	}{
+		{name: "WG remote create attempted"},
+		{
+			name:   "WG found, enabled",
+			mutate: func(_ *Config, nm *mockAthenaClient) { nm.GetWGStatus = true },
+		},
+		{
+			name: "WG found, disabled",
+			mutate: func(_ *Config, nm *mockAthenaClient) {
+				nm.GetWGStatus = true
+				nm.WGDisabled = true
+			},
+		},
+		{
+			name: "remote WG creation disallowed",
+			mutate: func(cfg *Config, _ *mockAthenaClient) {
+				cfg.SetWGRemoteCreationAllowed(false)
+			},
+			ping: driver.ErrBadConn,
+		},
 	}
-	var s3bucket string = "s3://fake-query-results-arbitrary-bucket/"
-
-	wgTags := NewWGTags()
-	wgTags.AddTag("Uber User", "henry.wu")
-	wgTags.AddTag("Uber Asset", "abc.efg")
-	wg := NewDefaultWG("henry_wu", nil, wgTags)
-	testConf := NewNoOpsConfig()
-	err := testConf.SetOutputBucket(s3bucket)
-	assert.Nil(t, err)
-	err = testConf.SetRegion("us-east-1")
-	assert.Nil(t, err)
-	testConf.SetUser("henry.wu")
-	testConf.SetDB("default") // default
-
-	_ = testConf.SetWorkGroup(wg)
-	c.connector.config = testConf
-	driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error",
-		[]driver.NamedValue{})
-	assert.Nil(t, driverRows)
-	assert.NotNil(t, err)
-}
-
-func TestConnection_QueryContext4(t *testing.T) {
-	t.Parallel()
-	nm := newMockAthenaClient()
-	nm.GetWGStatus = true
-	c := &Connection{
-		athenaClient: nm,
-		connector:    NoopsSQLConnector(),
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var mut []func(*Config, *mockAthenaClient)
+			if tc.mutate != nil {
+				mut = append(mut, tc.mutate)
+			}
+			c := newTestConnWithWG(mut...)
+			if tc.ping != nil {
+				assert.Equal(t, tc.ping, c.Ping(context.Background()))
+			}
+			driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error",
+				[]driver.NamedValue{})
+			assert.Nil(t, driverRows)
+			assert.NotNil(t, err)
+		})
 	}
-	var s3bucket string = "s3://fake-query-results-arbitrary-bucket/"
-
-	wgTags := NewWGTags()
-	wgTags.AddTag("Uber User", "henry.wu")
-	wgTags.AddTag("Uber Asset", "abc.efg")
-	wg := NewDefaultWG("henry_wu", nil, wgTags)
-	testConf := NewNoOpsConfig()
-	err := testConf.SetOutputBucket(s3bucket)
-	assert.Nil(t, err)
-	err = testConf.SetRegion("us-east-1")
-	assert.Nil(t, err)
-	testConf.SetUser("henry.wu")
-	testConf.SetDB("default") // default
-
-	_ = testConf.SetWorkGroup(wg)
-	c.connector.config = testConf
-
-	driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error",
-		[]driver.NamedValue{})
-	assert.Nil(t, driverRows)
-	assert.NotNil(t, err)
-}
-
-func TestConnection_QueryContext5(t *testing.T) {
-	t.Parallel()
-	nm := newMockAthenaClient()
-	nm.GetWGStatus = true
-	nm.WGDisabled = true
-
-	c := &Connection{
-		athenaClient: nm,
-		connector:    NoopsSQLConnector(),
-	}
-	var s3bucket string = "s3://fake-query-results-arbitrary-bucket/"
-
-	wgTags := NewWGTags()
-	wgTags.AddTag("Uber User", "henry.wu")
-	wgTags.AddTag("Uber Asset", "abc.efg")
-	wg := NewDefaultWG("henry_wu", nil, wgTags)
-	testConf := NewNoOpsConfig()
-	_ = testConf.SetOutputBucket(s3bucket)
-	_ = testConf.SetRegion("us-east-1")
-	testConf.SetUser("henry.wu")
-	testConf.SetDB("default") // default
-	_ = testConf.SetWorkGroup(wg)
-	c.connector.config = testConf
-
-	driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error",
-		[]driver.NamedValue{})
-	assert.Nil(t, driverRows)
-	assert.NotNil(t, err)
-}
-
-func TestConnection_QueryContext6(t *testing.T) {
-	t.Parallel()
-	nm := newMockAthenaClient()
-	c := &Connection{
-		athenaClient: nm,
-		connector:    NoopsSQLConnector(),
-	}
-	var s3bucket string = "s3://fake-query-results-arbitrary-bucket/"
-
-	wgTags := NewWGTags()
-	wgTags.AddTag("Uber User", "henry.wu")
-	wgTags.AddTag("Uber Asset", "abc.efg")
-	wg := NewDefaultWG("henry_wu", nil, wgTags)
-	testConf := NewNoOpsConfig()
-	err := testConf.SetOutputBucket(s3bucket)
-	assert.Nil(t, err)
-	err = testConf.SetRegion("us-east-1")
-	assert.Nil(t, err)
-	testConf.SetUser("henry.wu")
-	testConf.SetDB("default") // default
-	testConf.SetWGRemoteCreationAllowed(false)
-
-	_ = testConf.SetWorkGroup(wg)
-	c.connector.config = testConf
-
-	e := c.Ping(context.Background())
-	assert.Equal(t, e, driver.ErrBadConn)
-	driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error",
-		[]driver.NamedValue{})
-	assert.Nil(t, driverRows)
-	assert.NotNil(t, err)
 }
 
 func TestConnection_QueryContext7(t *testing.T) {
@@ -611,12 +509,12 @@ func TestConnection_QueryContext7(t *testing.T) {
 	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateCancelled",
 		[]driver.NamedValue{})
 	assert.Nil(t, driverRows)
-	assert.Equal(t, err, context.Canceled)
+	assert.Equal(t, context.Canceled, err)
 
 	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateFailed",
 		[]driver.NamedValue{})
 	assert.Nil(t, driverRows)
-	assert.Equal(t, err, ErrTestMockFailedByAthena)
+	assert.Equal(t, ErrTestMockFailedByAthena, err)
 
 	query := "SELECTExecContext_OK"
 	dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
@@ -664,7 +562,7 @@ func TestConnection_QueryContext7(t *testing.T) {
 
 	query = randString(MAXQueryStringLength * 10)
 	driverRows, err = c.QueryContext(context.Background(), query, []driver.NamedValue{})
-	assert.Equal(t, err, ErrInvalidQuery)
+	assert.Equal(t, ErrInvalidQuery, err)
 	assert.Nil(t, driverRows)
 
 	// Cancelled by AWS Athena
@@ -693,7 +591,7 @@ func TestConnection_QueryContext7(t *testing.T) {
 }
 
 func BenchmarkConnection_QueryContext(b *testing.B) {
-	for i := 0; i < 10000; i++ {
+	for range 10000 {
 		c := createConnectionFixture()
 		assert.Nil(b, c.Ping(context.Background()))
 	}
@@ -710,7 +608,7 @@ func createConnectionFixture() *Connection {
 	wgTags := NewWGTags()
 	wgTags.AddTag("Uber Author", "henry.wu")
 	wgTags.AddTag("Uber Role", "Engineer")
-	wg := NewDefaultWG("henry_wu", nil, wgTags)
+	wg := NewWG("henry_wu", nil, wgTags)
 	testConf := NewNoOpsConfig()
 	_ = testConf.SetOutputBucket(s3bucket)
 	_ = testConf.SetRegion(regions[rand.Int31n(int32(len(regions)))])
@@ -726,27 +624,15 @@ func createConnectionFixture() *Connection {
 
 func TestMoneyWise(t *testing.T) {
 	t.Parallel()
-	c := &Connection{
-		athenaClient: newMockAthenaClient(),
-		connector:    NoopsSQLConnector(),
-	}
-	var s3bucket string = "s3://fake-query-results-arbitrary-bucket/"
-
-	wgTags := NewWGTags()
-	wgTags.AddTag("Uber User", "henry.wu")
-	wgTags.AddTag("Uber Asset", "abc.efg")
-	wg := NewDefaultWG(DefaultWGName, nil, wgTags)
-	testConf := NewNoOpsConfig()
-	err := testConf.SetOutputBucket(s3bucket)
-	assert.Nil(t, err)
-	err = testConf.SetRegion("us-east-1")
-	assert.Nil(t, err)
-	testConf.SetUser("henry.wu")
-	testConf.SetDB("default") // default
-
-	_ = testConf.SetWorkGroup(wg)
-	testConf.SetMoneyWise(true)
-	c.connector.config = testConf
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		// Replace the default "henry_wu" WG with the default WG so the
+		// driver short-circuits resolveWorkgroup.
+		wgTags := NewWGTags()
+		wgTags.AddTag("Uber User", "henry.wu")
+		wgTags.AddTag("Uber Asset", "abc.efg")
+		_ = cfg.SetWorkGroup(NewWG(DefaultWGName, nil, wgTags))
+		cfg.SetMoneyWise(true)
+	})
 	query := "SELECTExecContext_OK"
 	dr, er := c.ExecContext(context.Background(), query, []driver.NamedValue{})
 	assert.Nil(t, er)
@@ -774,49 +660,28 @@ func TestMoneyWise(t *testing.T) {
 
 func TestConnection_CachedQuery(t *testing.T) {
 	t.Parallel()
-	c := &Connection{
-		athenaClient: newMockAthenaClient(),
-		connector:    NoopsSQLConnector(),
-	}
-	var s3bucket string = "s3://fake-query-results-arbitrary-bucket/"
-	testConf := NewNoOpsConfig()
-	err := testConf.SetOutputBucket(s3bucket)
-	assert.Nil(t, err)
-	err = testConf.SetRegion("us-east-1")
-	assert.Nil(t, err)
-	testConf.SetUser("henry.wu")
-	testConf.SetDB("default") // default
-	testConf.SetMoneyWise(true)
-	c.connector.config = testConf
-	query := "00000000-0000-0000-0000-000000000000"
-	dr, er := c.ExecContext(context.Background(), query, []driver.NamedValue{})
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		// CachedQuery's resolveWorkgroup path uses the empty/default WG,
+		// so reset the WG name to fall through quickly. Moneywise mode is
+		// what this test really exercises.
+		_ = cfg.SetWorkGroup(NewWG("", nil, nil))
+		cfg.SetMoneyWise(true)
+	})
+	dr, er := c.ExecContext(context.Background(),
+		"00000000-0000-0000-0000-000000000000", []driver.NamedValue{})
 	assert.Nil(t, er)
 	assert.NotNil(t, dr)
 }
 
 func Test_PseudoCommand(t *testing.T) {
 	t.Parallel()
-	c := &Connection{
-		athenaClient: newMockAthenaClient(),
-		connector:    NoopsSQLConnector(),
-	}
-	var s3bucket string = "s3://fake-query-results-arbitrary-bucket/"
-
-	wgTags := NewWGTags()
-	wgTags.AddTag("Uber User", "henry.wu")
-	wgTags.AddTag("Uber Asset", "abc.efg")
-	wg := NewDefaultWG(DefaultWGName, nil, wgTags)
-	testConf := NewNoOpsConfig()
-	err := testConf.SetOutputBucket(s3bucket)
-	assert.Nil(t, err)
-	err = testConf.SetRegion("us-east-1")
-	assert.Nil(t, err)
-	testConf.SetUser("henry.wu")
-	testConf.SetDB("default") // default
-
-	_ = testConf.SetWorkGroup(wg)
-	testConf.SetMoneyWise(true)
-	c.connector.config = testConf
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		wgTags := NewWGTags()
+		wgTags.AddTag("Uber User", "henry.wu")
+		wgTags.AddTag("Uber Asset", "abc.efg")
+		_ = cfg.SetWorkGroup(NewWG(DefaultWGName, nil, wgTags))
+		cfg.SetMoneyWise(true)
+	})
 
 	query := "pc:get_query_id"
 	dr, er := c.ExecContext(context.Background(), query, []driver.NamedValue{})
@@ -825,7 +690,7 @@ func Test_PseudoCommand(t *testing.T) {
 
 	query = "pc:get_query_id FAILED_AFTER_GETQID"
 	dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
-	assert.Equal(t, er.Error(), "FAILED_AFTER_GETQID_FAILED")
+	assert.Equal(t, "FAILED_AFTER_GETQID_FAILED", er.Error())
 	assert.Nil(t, dr)
 
 	query = "pc:get_query_id FAILED_AFTER_GETQID2"

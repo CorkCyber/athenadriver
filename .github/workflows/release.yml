@@ -1,0 +1,83 @@
+name: Release
+
+# Runs only when a GitHub Release is published. The release's tag decides
+# which module gets validated / packaged:
+#
+#   v*               driver  (module github.com/CorkCyber/athenadriver/v2)
+#   athenareader/v*  CLI     (cross-compiled binaries attached to the release)
+#   scope/otel/v*    metrics adapters (validated only — the tag alone
+#   scope/tally/v*   publishes a Go module; there is nothing to attach)
+#   scope/statsd/v*
+#
+# Tagging stays manual on purpose: the driver tag must exist on the proxy
+# before the sub-module tags (their go.mod files require athenadriver/v2),
+# so the ordering is a human decision, not a pipeline.
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write # gh release upload
+
+jobs:
+  driver:
+    name: validate driver
+    if: startsWith(github.event.release.tag_name, 'v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: go vet
+        run: go vet ./go/...
+      - name: go test
+        run: go test -race ./go/...
+
+  athenareader:
+    name: athenareader binaries
+    if: startsWith(github.event.release.tag_name, 'athenareader/v')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: athenareader
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: go test
+        run: go test -race ./...
+      - name: cross-compile
+        run: |
+          version="${GITHUB_REF_NAME#athenareader/}"
+          mkdir -p dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64; do
+            GOOS="${target%/*}"
+            GOARCH="${target#*/}"
+            out="dist/athenareader-${version}-${GOOS}-${GOARCH}"
+            [ "$GOOS" = "windows" ] && out="${out}.exe"
+            CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" go build -trimpath -o "$out" .
+          done
+          (cd dist && shasum -a 256 athenareader-* > SHA256SUMS)
+      - name: attach to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$GITHUB_REF_NAME" dist/athenareader-* dist/SHA256SUMS
+
+  adapters:
+    name: validate adapter
+    if: startsWith(github.event.release.tag_name, 'scope/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - name: go test
+        run: |
+          moddir="$(dirname "${GITHUB_REF_NAME}")" # scope/otel/v0.1.0 -> scope/otel
+          cd "$moddir"
+          go vet ./...
+          go test -race ./...

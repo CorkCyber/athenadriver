@@ -10,16 +10,60 @@
 
 ----
 
-:package: [athenadriver](https://github.com/uber/athenadriver/tree/master/go) - A fully-featured AWS Athena database driver for Go  
-:shell: [athenareader](https://github.com/uber/athenadriver/tree/master/athenareader) - A moneywise command line utililty to query athena in command line.
+:package: [athenadriver](https://github.com/CorkCyber/athenadriver/tree/master/go) - A fully-featured AWS Athena database driver for Go  
+:shell: [athenareader](https://github.com/CorkCyber/athenadriver/tree/master/athenareader) - A moneywise command line utililty to query athena in command line.
 
 ----
 
+## About this fork
+
+This repository is a Cork Cyber fork of
+[`grafana/athenadriver`](https://github.com/grafana/athenadriver), which
+is itself a fork of
+[`uber/athenadriver`](https://github.com/uber/athenadriver) (dormant
+since 2025-05-31). The fork chain looks like:
+
+```
+uber/athenadriver  →  grafana/athenadriver  →  CorkCyber/athenadriver
+   (dormant 2025)      (aws-sdk-go-v2 port)     (this repo)
+```
+
+The Grafana fork carried the v1 → v2 SDK port forward. This Cork Cyber
+fork picks up from there and adds the surface area uber/grafana left on
+the table:
+
+- Athena API features added since 2022 — `ClientRequestToken`,
+  `ResultReuseConfiguration`, `Catalog`, `EncryptionConfiguration`,
+  `ExpectedBucketOwner`, `SubstatementType`, `AssumeRoleWithWebIdentity`,
+  parameterized queries verified against v2.
+- Standard-library logging via `log/slog` (drops the `zap` /
+  `multierr` direct deps) and a path toward OpenTelemetry metrics +
+  traces (see TODO).
+- Connector-level `aws.Config` injection so callers can wire IMDS,
+  IRSA / EKS pod identity, SSO, OIDC, assume-role chains, and custom
+  retryers without touching the DSN.
+- `database/sql` interface coverage: `RowsColumnType{ScanType,
+  Nullable, PrecisionScale}`, `Statement.{ExecContext,QueryContext}`,
+  `Connection.{IsValid,ResetSession}`, `Driver.Validate`.
+- Hardening: paginator-based result streaming, region-aware cost
+  estimator, exponential backoff between status polls, ctx-cancelled
+  queries now actually issue `StopQueryExecution`.
+
+The public API surface from the upstream is preserved where possible.
+The notable break is the import path
+(`github.com/CorkCyber/athenadriver`); see CHANGELOG for the full
+migration notes.
+
+Upstream contributions are welcome here; PRs that originally targeted
+`uber/athenadriver` or `grafana/athenadriver` and never landed are good
+candidates to re-open against this repo.
+
 ## Overview
 
-(This project is a sandbox project and the development status is STABLE.)
-
-`athenadriver` is a fully-featured AWS Athena database driver for Go developed at Uber Technologies Inc.
+`athenadriver` is a fully-featured AWS Athena database driver for Go,
+originally developed at Uber Technologies Inc., carried forward by
+Grafana Labs through the aws-sdk-go-v2 migration, and now maintained
+here at Cork Cyber.
 It provides a hassle-free way of querying AWS Athena database with Go standard
 library. It not only provides basic features of Athena Go SDK, but 
 addresses some SDK's limitation, improves and extends it. Moreover, it also includes
@@ -46,11 +90,11 @@ Except the basic features provided by Go `database/sql` like error handling, dat
 - Read-Only mode - disable database write in driver level [:link:](#read-only-mode)
 - Moneywise mode :moneybag: - print out query cost(USD) for each query
 - Query with Athena Query ID(QID) - (the ultimate money saver! :money_with_wings: )
-- Pseudo commands from database/sql interface: `get_driver_version`, `get_query_id`, `get_query_id_status`, `stop_query_id`, `get_workgroup`, `list_workgroups`, `update_workgroup`, `get_cost`, `get_execution_report` etc [:link:](#pseudo-commands)
-- Builtin logging support with zap [:link:](#enable-driver-logging)
+- Pseudo commands on the `database/sql` interface: `get_driver_version`, `get_query_id`, `get_query_id_status`, `stop_query_id` [:link:](#pseudo-commands)
+- Built-in `log/slog` logging support [:link:](#enable-driver-logging)
 - Builtin metrics support with tally [:link:](#enable-metrics)
 
-`athenadriver` can extremely simplify your code. Check [athenareader](https://github.com/uber/athenadriver/tree/master/athenareader) out as an example and a convenient tool for your Athena query in command line. 
+`athenadriver` can extremely simplify your code. Check [athenareader](https://github.com/CorkCyber/athenadriver/tree/master/athenareader) out as an example and a convenient tool for your Athena query in command line. 
 
 ## How to set up/install/test `athenadriver`
 
@@ -80,76 +124,58 @@ For more details on `athenadriver`'s support on AWS credentials & S3 query resul
 
 ### Installation
 
-Before Go 1.17, `go get` can be used to install athenadriver:
+`athenadriver` requires Go 1.22+. Add the driver to your module:
 
-```go
-go get -u github.com/uber/athenadriver
+```bash
+go get github.com/CorkCyber/athenadriver/go
 ```
 
-Starting in Go 1.17, installing executables with `go get` is deprecated. `go install` may be used instead.
+To install the `athenareader` CLI tool:
 
-```go
-go install github.com/uber/athenadriver@latest
+```bash
+go install github.com/CorkCyber/athenadriver/athenareader@latest
 ```
-
 
 ### Tests
 
-We provide unit tests and integration tests in the codebase.
+The repository is split into three Go modules:
 
-#### Unit Test
+- `github.com/CorkCyber/athenadriver` — the driver itself (`./go/...`).
+- `github.com/CorkCyber/athenadriver/athenareader` — the CLI tool.
+- `github.com/CorkCyber/athenadriver/examples` — runnable example
+  programs, each in its own subdirectory.
 
-All the unit tests are self-contained and passed even in no-internet environment. Test coverage is 100%. 
+#### Unit tests
 
 ```bash
-$ cd $GOPATH/src/github.com/uber/athenadriver/go
-✔ /opt/share/go/path/src/github.com/uber/athenadriver [uber|✚ 1…12] 
-21:35 $ go test -coverprofile=coverage.out github.com/uber/athenadriver/go  && \
- go tool cover -func=coverage.out |grep -v 100.0%
-ok  	github.com/uber/athenadriver/go	9.255s	coverage: 100.0% of statements
+$ go test -race ./go/...
+ok    github.com/CorkCyber/athenadriver/go
 ```
 
+`make test` and `make cover` are equivalent shortcuts; `make cover`
+also writes `cover.html`.
 
-#### Integration Test
+#### Integration / example builds
 
-All integration tests are under [`examples`](https://github.com/uber/athenadriver/tree/master/examples) folder.
-Please make sure all prerequisites are met so that you can run the code on your own machine.
+Each example lives in its own subdirectory under `examples/` so it can
+be built or run independently. From the `examples/` module:
 
-All the code snippets in `examples` folder are fully tested in our machines. For example, 
-to run some stress and crash test, you can use `examples/perf/concurrency.go`. Build it first:
-
-```go
-$cd $GOPATH/src/github.com/uber/athenadriver
-$go build examples/perf/concurrency.go
+```bash
+$ cd examples
+$ go build ./...                              # build everything
+$ go run ./query/dml_select_simple            # run one example
 ```
 
-Run it, wait for some output but not all, and unplug your network cable:
-
-```go
-$./concurrency > examples/perf/concurrency.output.`date +"%Y-%m-%d-%H-%M-%S"`.log
-58,13,53,54,78,96,32,48,40,11,35,31,65,61,1,73,74,22,34,49,80,5,69,37,0,79,
-2020/02/09 13:49:29 error [38]RequestError: send request failed
-caused by: Post https://athena.us-east-1.amazonaws.com/: dial tcp: 
-lookup athena.us-east-1.amazonaws.com: no such host
-...
-2020/02/09 13:49:29 error [89]RequestError: send request failed
-caused by: Post https://athena.us-east-1.amazonaws.com/: dial tcp: 
-lookup athena.us-east-1.amazonaws.com: no such host
-```
-You can see `RequestError` is thrown out from the code. The active Athena queries failed because the network is down.
-Now re-plugin your cable and wait for network coming back, you can see the program automatically reconnects to Athena, and resumes to output data correctly:
-
-```go
-72,25,92,98,15,93,41,7,8,90,81,56,66,2,18,84,87,63,
-44,45,82,99,86,3,52,76,71,16,39,67,23,12,42,17,4,
-```
+The examples expect AWS credentials and an S3 results bucket; either
+fill them into the example source or rely on the AWS SDK default
+credential chain (env vars, `~/.aws/config`, IMDS, etc.).
 
 ## How to use `athenadriver`
 
 `athenadriver` is very easy to use. What you need to do it to import it in your code and then use the standard Go `database/sql` as usual.
 
 ```go
-import athenadriver "github.com/uber/athenadriver/go"
+import athenadriver "github.com/CorkCyber/athenadriver/go"
 ```
 
 The following are coding examples to demonstrate `athenadriver`'s features and how you should use `athenadriver` in your Go application.
@@ -157,14 +183,14 @@ Please be noted the code is for demonstration purpose only, so please follow you
 
 ### Get Started - A Simple Query
 
-The following is the simplest example for demonstration purpose. The source code is available at [dml_select_simple.go](https://github.com/uber/athenadriver/blob/master/examples/query/dml_select_simple.go)\.
+The following is the simplest example for demonstration purpose. The source code is available at [examples/query/dml_select_simple/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_simple/main.go).
 
 ```go
 package main
 
 import (
 	"database/sql"
-	drv "github.com/uber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -183,14 +209,11 @@ func main() {
 To make it work for you, please replace `OutputBucket`, `Region`, `AccessID` and
  `SecretAccessKey` with your own values. `sampledb` is provided by Amazon so you don't have to worry about it.
 
-To Build it:
-```go
-$ go build examples/query/dml_select_simple.go 
-```
+Build and run from the `examples/` module:
 
-Run it and you can see output like:
-```go
-$ ./dml_select_simple 
+```bash
+$ cd examples
+$ go run ./query/dml_select_simple
 https://www.example.com/articles/553
 ```
 
@@ -241,7 +264,7 @@ with AWS CLI Config: 456
 ```
 
 The above authentication method also works for querying Athena in [AWS Lambda](https://aws.amazon.com/lambda/). In lambda, you don't have to provide access ID, key and region, and you don't need AWS CLI config files either. You just need to specify the correct output bucket.
-Please check the AWS Lambda Go same code [here](https://github.com/uber/athenadriver/tree/master/examples/lambda/Go).
+Please check the AWS Lambda Go same code [here](https://github.com/CorkCyber/athenadriver/tree/master/examples/lambda/Go).
 
 #### Use `athenadriver` Config For Authentication
 
@@ -273,7 +296,7 @@ The sample output:
 with AthenaDriver Config: 123
 ```
 
-The full code is here at [examples/auth.go](https://github.com/uber/athenadriver/tree/master/examples/auth.go).
+The full code is here at [examples/auth/main.go](https://github.com/CorkCyber/athenadriver/tree/master/examples/auth/main.go).
 
 #### Use AWS SDK Default Credentials Resolution for Authentication
 If environment variable `AWS_SDK_LOAD_CONFIG` is NOT set and credentials are not supplied in the `athenadriver` configuration, the AWS SDK will look up credentials using its default methodology described here: https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html#specifying-credentials.
@@ -316,7 +339,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	drv "github.com/uber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -375,7 +398,7 @@ package main
 import (
 	"database/sql"
 	"log"
-	drv "github.com/uber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -444,7 +467,7 @@ package main
 
 import (
 	"database/sql"
-	drv "github.com/uber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -533,7 +556,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	drv "github.com/uber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -600,7 +623,7 @@ package main
 import (
 	"database/sql"
 	"log"
-	drv "github.com/uber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -653,7 +676,7 @@ import (
 	"database/sql"
 	"log"
 	"time"
-	drv "github.com/uber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -705,7 +728,7 @@ import (
 	"database/sql"
 	"log"
 	"time"
-	drv "github.com/uber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -741,31 +764,32 @@ func main() {
 }
 ```
 
+> **Per-query result encryption & reuse.** Two ctx-based per-query
+> overrides: `drv.WithResultEncryption(ctx, option, kmsKey)` sets a
+> one-off S3 encryption option (`athenatypes.EncryptionOption`) for that
+> query's result bytes, and `drv.WithResultReuse(ctx, maxAge)` opts a
+> single query into Athena's result-reuse cache (clamped to Athena's
+> supported 1 minute-7 day range; `maxAge <= 0` is a no-op). Both use the
+> standard `context.WithValue` pattern; pass the returned ctx to
+> `QueryContext`/`ExecContext`. See `go/ctxopts.go`. `Config.ResultEncryption`
+> sets the same thing driver-wide instead of per query.
 
 ### Missing Value Handling 
 
-It is common to have missing values in S3 file, or Athena DB. When this happens, you can specify if you want to use
-`empty string`, `default data`, or `nil` as the missing value, whichever is better to facilitate your data processing or ETL job. The default data for Athena column type are defined as below:
+S3 / Athena results can have missing values. The driver lets you
+choose between `empty string`, `default data`, or `nil` as the
+substitute, whichever is easiest to process downstream. Defaults by
+Athena type:
 
-```go
-func (r *Rows) getDefaultValueForColumnType(athenaType string) interface{} {
-	switch athenaType {
-	case "tinyint", "smallint", "integer", "bigint":
-		return 0
-	case "boolean":
-		return false
-	case "float", "double", "real":
-		return 0.0
-	case "date", "time", "time with time zone", "timestamp",
-		"timestamp with time zone":
-		return time.Time{}
-	default:
-		return ""
-	}
-}
-```
+| Athena type | Default value |
+| --- | --- |
+| `tinyint`, `smallint`, `integer`, `bigint` | `0` |
+| `boolean` | `false` |
+| `float`, `double`, `real` | `0.0` |
+| `date`, `time`, `time with time zone`, `timestamp`, `timestamp with time zone` | `time.Time{}` |
+| `json`, `char`, `varchar`, `varbinary`, `row`, `string`, `binary`, `struct`, `interval year to month`, `interval day to second`, `decimal`, `ipaddress`, `array`, `map`, `unknown` | `""` |
 
-By default, we use empty string to replace missing values and empty string is preferred to default data, or `nil`. To use
+By default, the driver uses empty string to replace missing values and empty string is preferred to default data, or `nil`. To use
 `default data`, you have to explicitly call:
 
 ```go
@@ -804,7 +828,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
-	drv "github.com/uber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -835,11 +859,14 @@ Sample Output:
 
 ### Pseudo Commands
 
-`athenadriver` provides `pseudo command` to support some special use cases beyond Go's standard database/sql framework.
-One sample use case is [Asynchronous Query Support](https://github.com/uber/athenadriver/issues/6#issuecomment-624132881).
-`pseudo command` is a special prefix string you can put in `db.QueryContext` or `db.QueryRow` or `db.ExecuteContext` etc.
+`athenadriver` provides `pseudo command` to support some special use
+cases beyond Go's standard `database/sql` framework. One example is
+asynchronous query support: fire a query, get its Athena query ID
+back immediately, poll for its status separately. A `pseudo command`
+is a special prefix string you put in `db.QueryContext`,
+`db.QueryRow`, or `db.ExecContext`.
 
-It is easier to explain with an example like  [pc_get_query_id.go](https://github.com/uber/athenadriver/blob/master/examples/pc_get_query_id.go).
+It is easier to explain with an example like  [pc_get_query_id.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_get_query_id/main.go).
 
 ```go
 package main
@@ -847,8 +874,8 @@ package main
 import (
 	"database/sql"
 	"os"
-	secret "github.com/uber/athenadriver/examples/constants"
-	drv "github.com/uber/athenadriver/go"
+	secret "github.com/CorkCyber/athenadriver/examples/constants"
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -872,8 +899,7 @@ func main() {
 }
 ```
 
-In [pc_get_query_id.go](https://github.com/uber/athenadriver/blob/master/examples/pc_get_query_id.go#L27), we only want to get the `Query ID` of the SQL statement, so we
-just to add `pc:get_query_id` before the sql statement. So the final string we pass to `db.QueryRow` is `pc:get_query_id select url from sampledb.elb_logs limit 2`. The return value is one row with an Athena Query ID inside. A sample Output is:
+In [pc_get_query_id/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_get_query_id/main.go), we only want the `Query ID` of the SQL statement, so we prepend `pc:get_query_id` to the SQL. So the final string we pass to `db.QueryRow` is `pc:get_query_id select url from sampledb.elb_logs limit 2`. The return value is one row with an Athena Query ID inside. A sample Output is:
 ```
 Query ID: c89088ab-595d-4ee6-a9ce-73b55aeb8953
 ```
@@ -884,31 +910,34 @@ The syntax is `pc:pseudo_command parameter`.
 
 ### get_query_id
 
-`pc:get_query_id SQL_STATEMENT` - Will return Query ID of the `SQL_STATEMENT`, no matter request fails or succeeds. Example: [pc_get_query_id.go](https://github.com/uber/athenadriver/blob/master/examples/pc_get_query_id.go).
+`pc:get_query_id SQL_STATEMENT` - Will return Query ID of the `SQL_STATEMENT`, no matter request fails or succeeds. Example: [pc_get_query_id.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_get_query_id/main.go).
 
 ### get_query_id_status
 
-`pc:get_query_id_status Query_ID` - Return status of the Query ID. Example: [pc_get_query_id_status.go](https://github.com/uber/athenadriver/blob/master/examples/pc_get_query_id_status.go).
+`pc:get_query_id_status Query_ID` - Return status of the Query ID. Example: [pc_get_query_id_status.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_get_query_id_status/main.go).
 
 ### stop_query_id
 
-`pc:stop_query_id Query_ID` - To stop the Query corresponding the Query ID. If there is no error, a one row string with `OK` will be returned. Example: [pc_stop_query_id.go](https://github.com/uber/athenadriver/blob/master/examples/pc_stop_query_id.go).
+`pc:stop_query_id Query_ID` - To stop the Query corresponding the Query ID. If there is no error, a one row string with `OK` will be returned. Example: [pc_stop_query_id.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_stop_query_id/main.go).
 
 ### get_driver_version
 
-`pc:get_driver_version` - To return the version of athenadriver. Example: [pc_get_driver_version.go](https://github.com/uber/athenadriver/blob/master/examples/pc_get_driver_version.go).
+`pc:get_driver_version` - To return the version of athenadriver. Example: [pc_get_driver_version.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_get_driver_version/main.go).
 
 
 ###  Enable Driver Logging
 
-You can enable driver logging to help you to debug, monitoring and know more details about the running system. Logging
- is by default enabled and implemented as a no-op Logger. You need to pass a workable logger to make it work. If you don't want to log at all, you need to explicitly call:
+The driver logs through the standard library's `log/slog`. By default it
+is silent: every record is routed to an internal discard handler, so
+importing the package does not emit anything until you opt in. The driver
+intentionally does not consult `slog.Default()` — apps that set a global
+default handler will not see driver logs spill into it unless they
+explicitly opt in.
 
-```go
-  Config.SetLogging(false)
-```
+#### Wiring a logger
 
-The following example is to pass in a zap Production logger.
+Attach a `*slog.Logger` to the `context.Context` you hand to
+`db.QueryContext` / `db.ExecContext` under the `LoggerKey` value:
 
 ```go
 package main
@@ -917,42 +946,53 @@ import (
 	"context"
 	"database/sql"
 	"log"
+	"log/slog"
+	"os"
 	"time"
-	"go.uber.org/zap"
-	drv "github.com/uber/athenadriver/go"
+
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
-	// 1. Set AWS Credential in Driver Config.
 	conf, _ := drv.NewDefaultConfig("s3://query-results-bucket-test/",
 		"us-east-2",
 		"dummy-to-be-replaced",
 		"dummy-to-be-replaced")
+	db, _ := sql.Open(drv.DriverName, conf.Stringify())
 
-	// 2. Open Connection.
-	dsn := conf.Stringify()
-	db, _ := sql.Open(drv.DBDriverName, dsn)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+		Level: slog.LevelInfo,
+	}))
 
-	logger, _ := zap.NewProduction()
-	defer logger.Sync()
-	// 3. Query cancellation after 2 seconds
-	ctx, _ := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
 	ctx = context.WithValue(ctx, drv.LoggerKey, logger)
+
 	rows, err := db.QueryContext(ctx, "select count(*) from sampledb.elb_logs")
 	if err != nil {
 		log.Fatal(err)
-		return
 	}
 	defer rows.Close()
 }
 ```
 
+The logger is read once per pooled connection, in `SQLConnector.Connect`.
+The first context that opens a pooled conn wins; subsequent queries on
+that same conn use the logger that was installed at open time. If you
+need per-query logger swapping, use separate `*sql.DB` instances.
 
-Sample Output:
-```go
-{"level":"warn","ts":1579556666.3372262,"caller":"athenadriver/observability.go:72","msg":"query canceled","resp.QueryExecutionId":
- "ef4f3f09-a480-445c-84ad-96ecd97a8e90"}
-2020/01/20 13:44:26 context deadline exceeded
+#### Opting out
+
+| Goal | How |
+| --- | --- |
+| Default (no logs at all) | Do nothing. The driver wires `slog.New(slog.NewTextHandler(io.Discard, nil))` automatically. |
+| Pass a no-op handler explicitly | `slog.New(slog.DiscardHandler)` (Go 1.24+) or `slog.New(slog.NewTextHandler(io.Discard, nil))`. |
+| Hard kill-switch | `conf.SetLogging(false)`. Short-circuits inside `DriverTracer.Log` before attrs are formatted; `DriverTracer.Logger()` returns the discard logger regardless of any context-supplied logger. |
+
+Sample output (with an `slog.NewJSONHandler` and Info-level threshold):
+
+```json
+{"time":"2026-06-15T13:44:26Z","level":"WARN","msg":"query canceled","queryID":"ef4f3f09-a480-445c-84ad-96ecd97a8e90"}
 ```
 
 ###  Enable Metrics
@@ -975,9 +1015,9 @@ import (
 	"io"
 	"log"
 	"time"
-	"github.com/cactus/go-statsd-client/statsd"
+	"github.com/cactus/go-statsd-client/v5/statsd"
 	tallystatsd "github.com/uber-go/tally/v4/statsd"
-	drv "github.com/uber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/go"
 	"github.com/uber-go/tally/v4"
 )
 
@@ -1001,7 +1041,7 @@ func main() {
 
 	// 2. Open Connection.
 	dsn := conf.Stringify()
-	db, _ := sql.Open(drv.DBDriverName, dsn)
+	db, _ := sql.Open(drv.DriverName, dsn)
 
 	// 3. Query cancellation after 2 seconds
 	// Create tally scope
@@ -1054,7 +1094,7 @@ DESC sampledb.elb_logs
 
 We can see there are 3 columns according to `ColumnInfo` under `ResultSetMetadata`. But in the first row `Rows[0]`, we see there is only 1 field: `"elb_name \tstring    \t    "`. I would imagine there could have been 3 items in the `Data[0]`, but somehow the code author doesn't split it with tab(`\t`), so it ends up with only 1 item. The same issue happens for `SHOW` statement.
 
-For more sample code, please check [util_desc_table.go](https://github.com/uber/athenadriver/blob/master/examples/query/util_desc_table.go), [util_desc_view.go](https://github.com/uber/athenadriver/blob/master/examples/query/util_desc_view.go), and [util_show.go](https://github.com/uber/athenadriver/blob/master/examples/query/util_show.go).
+For more sample code, see [util_desc_table/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/util_desc_table/main.go), [util_desc_view/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/util_desc_view/main.go), and [util_show/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/util_show/main.go).
 
 - `athenadriver`'s Solution:
 
@@ -1090,7 +1130,7 @@ Because this issue happens only in statements [`CTAS`](https://docs.aws.amazon.c
  returned from Athena, `athenadriver` sets `UpdateCount` as the value of
   the returned row.
 
-For more sample code, please check [ddl_ctas.go](https://github.com/uber/athenadriver/blob/master/examples/query/ddl_ctas.go), [ddl_cvas.go](https://github.com/uber/athenadriver/blob/master/examples/query/ddl_cvas.go), and [dml_insert_into.go](https://github.com/uber/athenadriver/blob/master/examples/query/dml_insert_into.go).
+For more sample code, see [ddl_ctas/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/ddl_ctas/main.go), [ddl_cvas/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/ddl_cvas/main.go), and [dml_insert_into_select/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_insert_into_select/main.go).
 
 ### Type Loss for map, struct, array etc
 
@@ -1122,8 +1162,8 @@ For data types: `array`, `map`, `json`, `char`, `varchar`, `varbinary`, `row`, `
 
 For time and date types: `date`, `time`, `time with time zone`, `timestamp`, `timestamp with time zone`, `athenadriver` returns Go's [`time.Time`](https://golang.org/pkg/time/#Time).
 
-Some sample code are available at [dml_select_array.go](https://github.com/uber/athenadriver/blob/master/examples/query/dml_select_array.go),
-[dml_select_map.go](https://github.com/uber/athenadriver/blob/master/examples/query/dml_select_map.go), [dml_select_time.go](https://github.com/uber/athenadriver/blob/master/examples/query/dml_select_time.go).
+Sample code: [dml_select_array/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_array/main.go),
+[dml_select_map/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_map/main.go), [dml_select_time/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_time/main.go).
 
 
 ## FAQ
@@ -1169,22 +1209,19 @@ You can get it with `DB.Query()` too. In the returned `ResultSet`, there is
 
 In practice, not only [`CTAS`](https://docs.aws.amazon.com/athena/latest/ug/ctas.html) statement but also `CVAS` and `INSERT INTO` will make a meaningful `UpdateCount`.
 
-## Development Status: Stable
+## Development Status
 
-All APIs are finalized, and no breaking changes will be made in the 1.x series of releases.
-
-This library is now at version 1 and follows [SemVer](http://semver.org/) strictly.
-
+This fork is preparing the v2.0.0 release, covering the `aws-sdk-go-v2`
+migration, the `log/slog` switch, and the Athena API additions listed
+in [CHANGELOG.md](CHANGELOG.md). The public API surface is intended to
+follow [SemVer](http://semver.org/) once tagged.
 
 ## Contributing
 
-We encourage and support an active, healthy community of contributors &mdash;
-including you! Details are in the [contribution guide](resources/CONTRIBUTING.md) and
-the [code of conduct](resources/CODE_OF_CONDUCT.md). The athenadriver maintainers keep an eye on
-issues and pull requests, but you can also report any negative conduct to
-[**oss-conduct@uber.com**](oss-conduct@uber.com). That email list is a private, safe space; even the athenadriver
-maintainers don't have access, so don't hesitate to hold us to a high
-standard.
+PRs and issues welcome. See [resources/CONTRIBUTING.md](resources/CONTRIBUTING.md)
+and the [code of conduct](resources/CODE_OF_CONDUCT.md). Contributions
+that originally targeted `uber/athenadriver` or `grafana/athenadriver`
+are good candidates to re-open against this repo.
 
 
 ### `athenadriver` UML Class Diagram
@@ -1207,49 +1244,36 @@ For the contributors, the following is `athenadriver` Package's UML Class Diagra
 - [Common Pitfalls When Using database/sql in Go](https://www.vividcortex.com/blog/2015/09/22/common-pitfalls-go/)
 - [Implement Sql Database Driver in 100 Lines of Go](https://vyskocil.org/blog/implement-sql-database-driver-in-100-lines-of-go/)
 
-## ChangeLog
+## Changelog
 
-### v1.1.15 - Merge community contribution (March 03, 2024)
-
-  - Rename S3 bucket in test code (@jonathanbaker7 Jonathan Baker, @henrywoo)
-  - Make poll interval configurable (@keshav-dataco Keshav Murthy)
-  - Add microseconds and nanosecond time format parsing (@Sly1024 Szilveszter Safar)
-  - Add option to return missing values as nil (@kevinwcyu Kevin Yu)
-
-### v1.1.14 - Merge community contribution (August 19, 2022)
-
-  - Adding default AWS SDK credential resolution to connector (@dfreiman-hbo, Dan Freiman)
-  - Bump go-pretty version to most recent version (@nyergler, Nathan Yergler)
-  - Expose DriverTracer factory functions (@andresmgot, Andres Martinez Gotor)
-  - Add support to go 1.17+ (@henrywoo, Henry Fuheng Wu)
-  - README cleanup (@henrywoo, Henry Fuheng Wu)
+See [CHANGELOG.md](CHANGELOG.md) for the full release history.
+[`grafana/athenadriver`](https://github.com/grafana/athenadriver) and
+[`uber/athenadriver`](https://github.com/uber/athenadriver) hold the
+pre-fork history.
 
 
 ----
 
-💡 `athenadriver` and `athenareader` are created and maintained by [Henry Fuheng Wu](mailto:wufuheng@gmail.com) and brought to you by [Uber Technologies](https://en.wikipedia.org/wiki/Uber).
+💡 `athenadriver` and `athenareader` were created by [Henry Fuheng Wu](mailto:wufuheng@gmail.com) at [Uber Technologies](https://en.wikipedia.org/wiki/Uber), carried forward through the `aws-sdk-go-v2` port by [Grafana Labs](https://github.com/grafana), and are now maintained by [Cork Cyber](https://github.com/CorkCyber).
 
 
 [doc-img]: https://img.shields.io/badge/GoDoc-Reference-red.svg
-[doc]: https://pkg.go.dev/mod/github.com/uber/athenadriver
+[doc]: https://pkg.go.dev/mod/github.com/CorkCyber/athenadriver
 
-[cov-img]: https://codecov.io/gh/uber/athenadriver/branch/master/graph/badge.svg
-[cov]: https://codecov.io/gh/uber/athenadriver
+[cov-img]: https://codecov.io/gh/CorkCyber/athenadriver/branch/master/graph/badge.svg
+[cov]: https://codecov.io/gh/CorkCyber/athenadriver
 
-[release-img]: https://img.shields.io/badge/release-v1.1.15-red
-[release]: https://github.com/uber/athenadriver/releases
+[release-img]: https://img.shields.io/github/v/tag/CorkCyber/athenadriver?label=release
+[release]: https://github.com/CorkCyber/athenadriver/releases
 
-[report-card-img]: https://goreportcard.com/badge/github.com/uber/athenadriver
-[report-card]: https://goreportcard.com/report/github.com/uber/athenadriver
+[report-card-img]: https://goreportcard.com/badge/github.com/CorkCyber/athenadriver
+[report-card]: https://goreportcard.com/report/github.com/CorkCyber/athenadriver
 
-[license-img]: https://img.shields.io/badge/License-Apache--2.0-red
-[license]: https://github.com/uber/athenadriver/blob/master/LICENSE
-
-[fossa-img]: https://app.fossa.com/api/projects/custom%2B4458%2Fgit%40github.com%3Auber%2Fathenadriver.git.svg?type=shield
-[fossa]: https://app.fossa.com/attribution/988b94c8-7015-4f6f-9a19-2ba6b240f992
+[license-img]: https://img.shields.io/badge/License-MIT-red
+[license]: https://github.com/CorkCyber/athenadriver/blob/master/LICENSE
 
 [release-policy]: https://golang.org/doc/devel/release.html#policy
 
-[made-img]: https://img.shields.io/badge/By-Uber%20Tech-red
-[made]: https://www.uber.com
+[made-img]: https://img.shields.io/badge/Maintained%20by-Cork%20Cyber-purple
+[made]: https://github.com/CorkCyber
 

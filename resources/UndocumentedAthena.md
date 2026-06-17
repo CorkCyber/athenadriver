@@ -15,7 +15,7 @@ What Amazon did tell you is the following values are also valid and fully suppor
 
 `json`, `varbinary`, `row`, `interval year to month`,  `interval day to second`,  `time`,  `time with time zone`,  `timestamp with time zone`
 
-When querying against the above types, for the first three [`json`](https://github.com/uber/athenadriver/blob/master/examples/query/dml_select_json.go), [`varbinary`](https://github.com/uber/athenadriver/blob/master/examples/query/dml_select_geo.go), [`row`](https://github.com/uber/athenadriver/blob/master/examples/query/dml_select_row.go), **athenadriver** will return its string representation.
+When querying against the above types, for the first three [`json`](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_json.go), [`varbinary`](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_geo.go), [`row`](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_row.go), **athenadriver** will return its string representation.
 For the rest, a Go `time.Time` object will be returned.
  
 In the following sample code, we use an SQL statement to `SELECT` som simple data of all the above types and then print them out.
@@ -27,9 +27,10 @@ package main
 import (
 	"context"
 	"database/sql"
-	secret "github.com/uber/athenadriver/examples/constants"
-	drv "github.com/uber/athenadriver/go"
-	"go.uber.org/zap"
+	"log/slog"
+	"os"
+
+	drv "github.com/CorkCyber/athenadriver/go"
 )
 
 func main() {
@@ -41,7 +42,7 @@ func main() {
 	}
 	// 2. Open Connection.
 	dsn := conf.Stringify()
-	db, _ := sql.Open(drv.DBDriverName, dsn)
+	db, _ := sql.Open(drv.DriverName, dsn)
 	// 3. Query and print results
 	query := "SELECT JSON '\"Hello Athena\"', " +
 		"ST_POINT(-74.006801, 40.70522), " +
@@ -50,8 +51,7 @@ func main() {
 		"TIME '01:02:03.456', " +
 		"TIME '01:02:03.456 America/Los_Angeles', " +
 		"TIMESTAMP '2001-08-22 03:04:05.321 America/Los_Angeles';"
-	logger, _ := zap.NewDevelopment()
-	defer logger.Sync()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	ctx := context.WithValue(context.Background(), drv.LoggerKey, logger)
 	rows, err := db.QueryContext(ctx, query)
 	if err != nil {
@@ -105,7 +105,7 @@ DESC sampledb.elb_logs
 
 We can see there are 3 columns according to `ColumnInfo` under `ResultSetMetadata`. But in the first row `Rows[0]`, we see there is only 1 field: `"elb_name \tstring    \t    "`. I would imagine there could have been 3 items in the `Data[0]`, but somehow the code author doesn't split it with tab(`\t`), so it ends up with only 1 item. The same issue happens for `SHOW` statement.
 
-For more sample code, please check [util_desc_table.go](https://github.com/uber/athenadriver/blob/master/examples/query/util_desc_table.go), [util_desc_view.go](https://github.com/uber/athenadriver/blob/master/examples/query/util_desc_view.go), and [util_show.go](https://github.com/uber/athenadriver/blob/master/examples/query/util_show.go).
+For more sample code, please check [util_desc_table.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/util_desc_table.go), [util_desc_view.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/util_desc_view.go), and [util_show.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/util_show.go).
 
 - `awsathendriver`'s Solution:
 
@@ -141,7 +141,7 @@ Because this issue happens only in statements [`CTAS`](https://docs.aws.amazon.c
  returned from Athena, `athenadriver` sets `UpdateCount` as the value of
   the returned row.
 
-For more sample code, please check [ddl_ctas.go](https://github.com/uber/athenadriver/blob/master/examples/query/ddl_ctas.go), [ddl_cvas.go](https://github.com/uber/athenadriver/blob/master/examples/query/ddl_cvas.go), [dml_insert_into_select.go](https://github.com/uber/athenadriver/blob/master/examples/query/dml_insert_into_select.go) and [dml_insert_into_values.go](https://github.com/uber/athenadriver/blob/master/examples/query/dml_insert_into_values.go).
+For more sample code, please check [ddl_ctas.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/ddl_ctas.go), [ddl_cvas.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/ddl_cvas.go), [dml_insert_into_select.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_insert_into_select.go) and [dml_insert_into_values.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_insert_into_values.go).
 
 
 ## When the Row resultset contains Header
@@ -167,7 +167,7 @@ In Athena source code, it is defined like:
 
 To ge the statement type, you can check [GetQueryExecutionOutput.QueryExecution.StatementType](https://docs.aws.amazon.com/athena/latest/APIReference/API_QueryExecution.html).
 
-You can find all the statements' examples from [github.com/uber/athenadriver/examples/query](https://github.com/uber/athenadriver/tree/master/examples/query).
+You can find all the statements' examples from [github.com/CorkCyber/athenadriver/examples/query](https://github.com/CorkCyber/athenadriver/tree/master/examples/query).
 
 ## How should we set `Database` in `athena.QueryExecutionContext{}`?
 
@@ -353,5 +353,8 @@ If the s3 bucket owner and the account owner are different, you need to do [Cros
 
 ## Contributing
 
-As always, we welcome feedback and contributions. If you have any tips and findings about Athena, please feel free to contact [Henry Fuheng Wu](mailto:wufuheng@gmail.com).
+Feedback and contributions welcome. Original author of this document
+was [Henry Fuheng Wu](mailto:wufuheng@gmail.com); the Cork Cyber
+maintainers track follow-ups via the
+[project's GitHub issues](https://github.com/CorkCyber/athenadriver/issues).
 

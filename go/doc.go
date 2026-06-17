@@ -1,25 +1,9 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 // Package athenadriver is a fully-featured Go database/sql driver for
-// Amazon AWS Athena developed at Uber Technologies Inc.
+// Amazon AWS Athena. Originally developed at Uber Technologies Inc.,
+// forked by Grafana Labs for aws-sdk-go-v2, and maintained by Cork
+// Cyber on this branch.
 //
 // It provides a hassle-free way of querying AWS Athena database with Go
 // standard library. It not only provides basic features of Athena Go SDK, but
@@ -47,5 +31,33 @@
 // serverless, so there is no infrastructure to set up or manage. You pay only
 // for the queries you run. Athena scales automatically—executing queries
 // in parallel—so results are fast, even with large datasets and complex queries.
-// Author: Henry Fuheng Wu (wufuheng@gmail.com, henry.wu@uber.com)
+//
+// # Logging
+//
+// The driver uses log/slog. By default it is silent: every log record is
+// routed to an internal discard handler, so importing this package does not
+// emit anything until you opt in.
+//
+// To capture driver logs, attach a *slog.Logger to the context you hand to
+// db.QueryContext / db.ExecContext under the LoggerKey value:
+//
+//	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+//	    Level: slog.LevelInfo,
+//	}))
+//	ctx := context.WithValue(ctx, athenadriver.LoggerKey, logger)
+//	rows, err := db.QueryContext(ctx, "SELECT 1")
+//
+// The logger is read once per pooled connection (in SQLConnector.Connect),
+// so the first ctx that opens a given conn wins. Subsequent queries on the
+// same pooled conn use that logger. Use separate *sql.DB instances if you
+// need per-query logger swapping.
+//
+// The driver intentionally does not consult slog.Default(). Apps that set a
+// global default handler will not see driver logs spill into it unless they
+// explicitly opt in via LoggerKey above.
+//
+// To silence the driver after a logger has been wired in, call
+// Config.SetLogging(false). This short-circuits DriverTracer.Log before
+// attrs are formatted and forces Logger() to return the discard logger,
+// regardless of what was passed via LoggerKey. It is the hard kill-switch.
 package athenadriver

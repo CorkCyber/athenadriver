@@ -4,12 +4,12 @@
 
 ## Authentication Method
 
-To avoid exposing access keys(Access Key ID and Secret Access Key) in command line, `athenareader` use [AWS CLI Config For Authentication](https://github.com/uber/athenadriver#use-aws-cli-config-for-authentication) method.
+To avoid exposing access keys(Access Key ID and Secret Access Key) in command line, `athenareader` use [AWS CLI Config For Authentication](https://github.com/CorkCyber/athenadriver#use-aws-cli-config-for-authentication) method.
 
 ## How to get/build/install `athenareader`
 
 ```
-go get -u github.com/uber/athenadriver/athenareader
+go get -u github.com/CorkCyber/athenadriver/athenareader
 ```
 
 ## How to use `athenareader`
@@ -284,12 +284,13 @@ writing to Athena database is disallowed in read-only mode
 ```
 	
 	
-AUTHOR
+AUTHORS
 
-	Henry Fuheng Wu (wufuheng@gmail.com)
+	Created by Henry Fuheng Wu (wufuheng@gmail.com) at Uber Technologies.
+	Maintained by Cork Cyber (https://github.com/CorkCyber).
 
 REPORTING BUGS
 
-	https://github.com/uber/athenadriver
+	https://github.com/CorkCyber/athenadriver/issues
 
 

@@ -1,24 +1,8 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 package athenadriver
+
+import "runtime/debug"
 
 // TContextKey is a type for key in context.
 type TContextKey string
@@ -56,13 +40,50 @@ const (
 	// LoggerKey is the key for Logger in context
 	LoggerKey = TContextKey("LoggerKey")
 
-	// DummyRegion is used when AWS CLI Config is used, ie AWS_SDK_LOAD_CONFIG is set
+	// CatalogKey overrides the Athena data catalog used for a single query.
+	// Value must be a non-empty string. When unset, the driver falls back to
+	// Config.GetCatalog(), which itself defaults to AWS's default catalog.
+	CatalogKey = TContextKey("CatalogKey")
+
+	// ResultEncryptionKey overrides the ResultConfiguration.EncryptionConfiguration
+	// sent on StartQueryExecution for a single query. Value must be a
+	// *athenatypes.EncryptionConfiguration. Use WithResultEncryption for a
+	// typed helper. When unset, the driver falls back to
+	// Config.GetResultEncryption().
+	ResultEncryptionKey = TContextKey("ResultEncryptionKey")
+
+	// ExpectedBucketOwnerKey overrides ResultConfiguration.ExpectedBucketOwner
+	// for a single query. Value must be a non-empty string (12-digit AWS
+	// account ID). When unset, the driver falls back to
+	// Config.GetExpectedBucketOwner().
+	ExpectedBucketOwnerKey = TContextKey("ExpectedBucketOwnerKey")
+
+	// ResultReuseMaxAgeKey opts a single query into Athena's result-reuse
+	// cache (engine v3). Value must be a time.Duration in (0, 60min].
+	// Athena will reuse a previous successful result for the same query
+	// text if it is no older than this duration, saving the scan cost.
+	// Use WithResultReuse for a typed helper.
+	ResultReuseMaxAgeKey = TContextKey("ResultReuseMaxAgeKey")
+
+	// ClientRequestTokenKey overrides the ClientRequestToken sent on
+	// StartQueryExecution for a single query. Value must be a non-empty
+	// string (32–128 ASCII chars per Athena's API). When unset, the driver
+	// generates a fresh UUID per query so SDK-level retries do not re-charge
+	// scan cost.
+	ClientRequestTokenKey = TContextKey("ClientRequestTokenKey")
+
+	// DefaultCatalog is the AWS-managed default Athena data catalog.
+	DefaultCatalog = "AwsDataCatalog"
+
+	// DummyRegion is a sentinel value used by the auth/lambda examples when
+	// they rely on AWS_SDK_LOAD_CONFIG / IRSA / instance profile and want
+	// the driver's DSN-driven static credentials path to no-op.
 	DummyRegion = "dummy"
 
-	// DummyAccessID is used when AWS CLI Config is used, ie AWS_SDK_LOAD_CONFIG is set
+	// DummyAccessID — see DummyRegion.
 	DummyAccessID = "dummy"
 
-	// DummySecretAccessKey is used when AWS CLI Config is used, ie AWS_SDK_LOAD_CONFIG is set
+	// DummySecretAccessKey — see DummyRegion.
 	DummySecretAccessKey = "dummy"
 )
 
@@ -107,5 +128,35 @@ const PCStopQID = "stop_query_id"
 // PCGetDriverVersion is the pseudo command to get the version of athenadriver
 const PCGetDriverVersion = "get_driver_version"
 
-// DriverVersion is athenadriver's version
-const DriverVersion = "1.1.15"
+// version is set at build time via ldflags:
+//
+//	go build -ldflags "-X github.com/CorkCyber/athenadriver/go.version=v2.0.0"
+//
+// Leave empty for non-release builds; DriverVersion falls back to the VCS
+// revision (or "dev") in that case.
+var version string
+
+// DriverVersion returns the driver version string surfaced by the
+// `pc:get_driver_version` pseudo-command and any caller that wants a
+// human-readable build tag. Resolution order:
+//  1. -ldflags-injected `version`
+//  2. VCS revision (short SHA) recorded in the binary's BuildInfo
+//  3. "dev"
+func DriverVersion() string { return cachedVersion }
+
+var cachedVersion = func() string {
+	if version != "" {
+		return version
+	}
+	if info, ok := debug.ReadBuildInfo(); ok {
+		for _, s := range info.Settings {
+			if s.Key == "vcs.revision" && s.Value != "" {
+				if len(s.Value) > 7 {
+					return s.Value[:7]
+				}
+				return s.Value
+			}
+		}
+	}
+	return "dev"
+}()

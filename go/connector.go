@@ -1,22 +1,4 @@
-// Copyright (c) 2022 Uber Technologies, Inc.
-//
-// Permission is hereby granted, free of charge, to any person obtaining a copy
-// of this software and associated documentation files (the "Software"), to deal
-// in the Software without restriction, including without limitation the rights
-// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-// copies of the Software, and to permit persons to whom the Software is
-// furnished to do so, subject to the following conditions:
-//
-// The above copyright notice and this permission notice shall be included in
-// all copies or substantial portions of the Software.
-//
-// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
-// THE SOFTWARE.
+// SPDX-License-Identifier: MIT
 
 package athenadriver
 
@@ -27,19 +9,88 @@ import (
 	"strconv"
 	"time"
 
+	"log/slog"
+
 	"github.com/uber-go/tally/v4"
-	"go.uber.org/zap"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/aws/aws-sdk-go-v2/service/athena"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 )
 
 // SQLConnector is the connector for AWS Athena Driver.
 type SQLConnector struct {
 	config *Config
 	tracer *DriverTracer
+	// awsConfig is an optional caller-supplied aws.Config used verbatim
+	// instead of the DSN-driven credential resolution. Lets callers wire
+	// up IMDS/IRSA/SSO/OIDC/assume-role chains, custom retryers, or any
+	// other aws-sdk-go-v2 configuration the driver does not surface
+	// individually. nil means "fall back to DSN-driven resolution".
+	awsConfig *aws.Config
+}
+
+// NewConnector returns a SQLConnector for the given DSN-parsed Config.
+// Callers that need to drive credential resolution themselves should
+// chain WithAWSConfig.
+func NewConnector(cfg *Config) *SQLConnector {
+	return &SQLConnector{config: cfg}
+}
+
+// WithAWSConfig injects a caller-built aws.Config. When set, Connect uses
+// it verbatim instead of synthesizing one from DSN keys. Returns the same
+// connector for chaining.
+func (c *SQLConnector) WithAWSConfig(awsCfg aws.Config) *SQLConnector {
+	c.awsConfig = &awsCfg
+	return c
+}
+
+// resolveAWSConfig returns the aws.Config the Athena client should use.
+// See Connect for the precedence rules.
+func (c *SQLConnector) resolveAWSConfig(ctx context.Context) (aws.Config, error) {
+	if c.awsConfig != nil {
+		return *c.awsConfig, nil
+	}
+	profile := c.config.GetAWSProfile()
+	loadSharedConfig, _ := strconv.ParseBool(os.Getenv("AWS_SDK_LOAD_CONFIG"))
+	if profile != "" || loadSharedConfig {
+		opts := []func(*config.LoadOptions) error{}
+		if profile != "" {
+			opts = append(opts, config.WithSharedConfigProfile(profile))
+		}
+		if region := c.config.GetRegion(); region != "" {
+			opts = append(opts, config.WithRegion(region))
+		}
+		return config.LoadDefaultConfig(ctx, opts...)
+	}
+	if roleARN, tokenFile, sessionName := c.config.GetWebIdentity(); roleARN != "" && tokenFile != "" {
+		base := aws.Config{Region: c.config.GetRegion()}
+		stsClient := sts.NewFromConfig(base)
+		provider := stscreds.NewWebIdentityRoleProvider(
+			stsClient, roleARN, stscreds.IdentityTokenFile(tokenFile),
+			func(o *stscreds.WebIdentityRoleOptions) {
+				if sessionName != "" {
+					o.RoleSessionName = sessionName
+				}
+			},
+		)
+		base.Credentials = aws.NewCredentialsCache(provider)
+		return base, nil
+	}
+	if c.config.GetAccessID() != "" {
+		return aws.Config{
+			Region: c.config.GetRegion(),
+			Credentials: credentials.NewStaticCredentialsProvider(
+				c.config.GetAccessID(),
+				c.config.GetSecretAccessKey(),
+				c.config.GetSessionToken(),
+			),
+		}, nil
+	}
+	return aws.Config{Region: c.config.GetRegion()}, nil
 }
 
 // NoopsSQLConnector is to create a noops SQLConnector.
@@ -61,52 +112,40 @@ type AthenaClient interface {
 	StopQueryExecution(context.Context, *athena.StopQueryExecutionInput, ...func(*athena.Options)) (*athena.StopQueryExecutionOutput, error)
 }
 
-// Driver is to construct a new SQLConnector.
+// Driver implements driver.Connector. SQLDriver is stateless, so this
+// returns a fresh instance rather than a back-reference to whatever
+// actually produced c (a connector built directly via NewConnector was
+// never produced by any SQLDriver at all).
 func (c *SQLConnector) Driver() driver.Driver {
 	return &SQLDriver{}
 }
 
-// Connect is to create an AWS session.
-// The order to find auth information to create session is:
-// 1. Manually set  AWS profile in Config by calling config.SetAWSProfile(profileName)
-// 2. AWS_SDK_LOAD_CONFIG
-// 3. Static Credentials
-// Ref: https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html
+// Connect creates the underlying Athena client. Credential resolution
+// follows this precedence:
+//
+//  1. WithAWSConfig — caller-supplied aws.Config used verbatim.
+//  2. Config.SetAWSProfile, or the AWS_SDK_LOAD_CONFIG env var, triggers
+//     config.LoadDefaultConfig with the configured shared-config profile.
+//     This is the path for ~/.aws/config-driven setups, IRSA / EKS pod
+//     identity, SSO, OIDC, and assume-role chains.
+//  3. DSN-supplied static access key / secret / session token.
+//  4. Region-only aws.Config — relies on the default credential chain
+//     (env vars, IMDS, container creds, etc.).
 func (c *SQLConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	now := time.Now()
 	c.tracer = NewDefaultObservability(c.config)
 	if metrics, ok := ctx.Value(MetricsKey).(tally.Scope); ok {
 		c.tracer.SetScope(metrics)
 	}
-	if logger, ok := ctx.Value(LoggerKey).(*zap.Logger); ok {
+	if logger, ok := ctx.Value(LoggerKey).(*slog.Logger); ok {
 		c.tracer.SetLogger(logger)
 	}
 
-	var awsCfg aws.Config
-	var err error
-	// respect AWS_SDK_LOAD_CONFIG and local ~/.aws/credentials, ~/.aws/config
-	if ok, _ := strconv.ParseBool(os.Getenv("AWS_SDK_LOAD_CONFIG")); ok {
-		if profile := c.config.GetAWSProfile(); profile != "" {
-			awsCfg, err = config.LoadDefaultConfig(ctx, config.WithSharedConfigProfile(profile))
-			if err != nil {
-				c.tracer.Scope().Counter(DriverName + ".failure.sqlconnector.newsession").Inc(1)
-				return nil, err
-			}
-		}
-	} else if c.config.GetAccessID() != "" {
-		staticCredentials := credentials.NewStaticCredentialsProvider(c.config.GetAccessID(),
-			c.config.GetSecretAccessKey(),
-			c.config.GetSessionToken())
-		awsCfg = aws.Config{
-			Region:      c.config.GetRegion(),
-			Credentials: staticCredentials,
-		}
-	} else {
-		awsCfg = aws.Config{
-			Region: c.config.GetRegion(),
-		}
+	awsCfg, err := c.resolveAWSConfig(ctx)
+	if err != nil {
+		c.tracer.Scope().Counter(DriverName + ".failure.sqlconnector.newsession").Inc(1)
+		return nil, err
 	}
-
 	athenaClient := athena.NewFromConfig(awsCfg)
 	timeConnect := time.Since(now)
 	conn := &Connection{

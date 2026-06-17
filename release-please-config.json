@@ -1,0 +1,25 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "release-type": "go",
+  "tag-separator": "/",
+  "separate-pull-requests": true,
+  "packages": {
+    ".": {
+      "component": "athenadriver",
+      "include-component-in-tag": false,
+      "changelog-path": "CHANGELOG.md"
+    },
+    "athenareader": {
+      "component": "athenareader"
+    },
+    "scope/otel": {
+      "component": "scope/otel"
+    },
+    "scope/tally": {
+      "component": "scope/tally"
+    },
+    "scope/statsd": {
+      "component": "scope/statsd"
+    }
+  }
+}

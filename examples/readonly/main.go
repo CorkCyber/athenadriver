@@ -21,7 +21,7 @@ func main() {
 		log.Fatal(err)
 		return
 	}
-	conf.SetReadOnly(true)
+	conf.ReadOnly = true
 
 	// 2. Open Connection.
 	dsn := conf.Stringify()

@@ -19,7 +19,7 @@ func main() {
 	// 1. Set AWS Credential in Driver Config.
 	conf, err := drv.NewDefaultConfig(secret.OutputBucket, secret.Region,
 		secret.AccessID, secret.SecretAccessKey)
-	conf.SetLogging(true)
+	conf.LoggingEnabled = true
 	if err != nil {
 		log.Fatal(err)
 		return

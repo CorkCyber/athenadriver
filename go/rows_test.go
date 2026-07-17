@@ -43,7 +43,7 @@ func TestOnePageSuccess(t *testing.T) {
 	}
 	for _, test := range tests {
 		r, _ := NewRows(context.Background(), newMockAthenaClient(),
-			test.queryID, testConf, NewDefaultObservability(testConf))
+			test.queryID, testConf, NewObservability(testConf, nil, nil))
 
 		var testArray, firstName, lastName string
 		var active bool
@@ -88,7 +88,7 @@ func TestNextFailure(t *testing.T) {
 	for _, test := range tests {
 		r, _ := NewRows(context.Background(), newMockAthenaClient(),
 			test.queryID,
-			testConf, NewDefaultObservability(testConf))
+			testConf, NewObservability(testConf, nil, nil))
 
 		var testArray, firstName, lastName string
 		var active bool
@@ -133,7 +133,7 @@ func TestMultiplePages(t *testing.T) {
 	for _, test := range tests {
 		r, _ = NewRows(context.Background(), newMockAthenaClient(),
 			test.queryID,
-			testConf, NewDefaultObservability(testConf))
+			testConf, NewObservability(testConf, nil, nil))
 
 		var testArray, firstName, lastName string
 		var active bool
@@ -180,7 +180,7 @@ func TestRows_Columns(t *testing.T) {
 	for _, test := range tests {
 		r, _ := NewRows(context.Background(), newMockAthenaClient(),
 			test.queryID,
-			testConf, NewDefaultObservability(testConf))
+			testConf, NewObservability(testConf, nil, nil))
 		assert.Equal(t, len(r.Columns()), len(cs))
 	}
 }
@@ -204,7 +204,7 @@ func TestRows_ColumnTypeDatabaseTypeName(t *testing.T) {
 	for _, test := range tests {
 		r, _ := NewRows(context.Background(), newMockAthenaClient(),
 			test.queryID,
-			testConf, NewDefaultObservability(testConf))
+			testConf, NewObservability(testConf, nil, nil))
 		for i, v := range cs {
 			assert.Equal(t, r.ColumnTypeDatabaseTypeName(i), *v.Type)
 
@@ -231,7 +231,7 @@ func TestRows_GetDefaultValueForColumnType(t *testing.T) {
 	for _, test := range tests {
 		r, _ := NewRows(context.Background(), newMockAthenaClient(),
 			test.queryID,
-			testConf, NewDefaultObservability(testConf))
+			testConf, NewObservability(testConf, nil, nil))
 		for _, v := range []string{"tinyint", "smallint", "integer", "bigint"} {
 			assert.Equal(t, 0, r.getDefaultValueForColumnType(v))
 		}
@@ -254,7 +254,7 @@ func TestRows_GetDefaultValueForColumnType(t *testing.T) {
 func TestRows_AthenaTypeToGoType(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	r, _ := NewRows(context.Background(), newMockAthenaClient(),
-		"SELECT_OK", testConf, NewDefaultObservability(testConf))
+		"SELECT_OK", testConf, NewObservability(testConf, nil, nil))
 	c := newColumnInfo("a", "tinyint")
 	// tinyint
 	rv := "1"
@@ -398,23 +398,23 @@ func TestRows_AthenaTypeToGoType(t *testing.T) {
 	assert.Nil(t, e)
 	assert.Equal(t, "", g)
 
-	testConf.SetMissingAsEmptyString(false)
-	testConf.SetMissingAsDefault(true)
-	testConf.SetMissingAsNil(false)
+	testConf.MissingAsEmptyString = false
+	testConf.MissingAsDefault = true
+	testConf.MissingAsNil = false
 	g, e = r.athenaTypeToGoType(c, nil, testConf)
 	assert.Nil(t, e)
 	assert.Equal(t, 0, g)
 
-	testConf.SetMissingAsEmptyString(false)
-	testConf.SetMissingAsDefault(false)
-	testConf.SetMissingAsNil(true)
+	testConf.MissingAsEmptyString = false
+	testConf.MissingAsDefault = false
+	testConf.MissingAsNil = true
 	g, e = r.athenaTypeToGoType(c, nil, testConf)
 	assert.Nil(t, e)
 	assert.Nil(t, g)
 
-	testConf.SetMissingAsEmptyString(false)
-	testConf.SetMissingAsDefault(false)
-	testConf.SetMissingAsNil(false)
+	testConf.MissingAsEmptyString = false
+	testConf.MissingAsDefault = false
+	testConf.MissingAsNil = false
 	g, e = r.athenaTypeToGoType(c, nil, testConf)
 	assert.NotNil(t, e)
 	assert.Nil(t, g)
@@ -429,7 +429,7 @@ func TestRows_AthenaTypeToGoType(t *testing.T) {
 func TestRows_ColumnTypeDatabaseTypeName2(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	r, _ := NewRows(context.Background(), newMockAthenaClient(),
-		"SELECT_OK", testConf, NewDefaultObservability(testConf))
+		"SELECT_OK", testConf, NewObservability(testConf, nil, nil))
 	c := newColumnInfo("a", nil)
 	getQueryResultsOutput := &athena.GetQueryResultsOutput{
 		ResultSet: &athenatypes.ResultSet{
@@ -448,39 +448,39 @@ func TestRows_NewRows(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	r, e := NewRows(context.Background(), newMockAthenaClient(),
 		"1coloumn0row",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
 
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"1coloumn0row_valid",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.Equal(t, *r.ResultOutput.ResultSet.Rows[0].Data[0].VarCharValue,
 		"1024")
 
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"column_more_than_row_fields",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
 
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"row_fields_more_than_column",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
 
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"GetQueryResultsWithContext_return_error",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.NotNil(t, e)
 	assert.Nil(t, r)
 
 	// rawValue is nil
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"missing_data_resp",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
 	var dest []driver.Value = make([]driver.Value, 8)
@@ -488,11 +488,11 @@ func TestRows_NewRows(t *testing.T) {
 	assert.Equal(t, nil, e)
 
 	// raise error for missing value
-	testConf.SetMissingAsEmptyString(false)
-	testConf.SetMissingAsDefault(false)
+	testConf.MissingAsEmptyString = false
+	testConf.MissingAsDefault = false
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"missing_data_resp",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
 	e = r.Next(dest)
@@ -500,7 +500,7 @@ func TestRows_NewRows(t *testing.T) {
 
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"missing_data_resp2",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
 	e = r.Next(dest)
@@ -509,7 +509,7 @@ func TestRows_NewRows(t *testing.T) {
 	// error when row.Next()
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"SELECT_GetQueryResults_ERR",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
 	for {
@@ -523,7 +523,7 @@ func TestRows_NewRows(t *testing.T) {
 	// missing row in page
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"SELECT_EMPTY_ROW_IN_PAGE",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
 	for {
@@ -537,7 +537,7 @@ func TestRows_NewRows(t *testing.T) {
 	// close in the loop
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"SELECT_GetQueryResults_ERR",
-		testConf, NewDefaultObservability(testConf))
+		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
 	cnt := 0

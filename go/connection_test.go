@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"math"
 	"math/rand"
 	"testing"
 	"time"
@@ -30,8 +31,8 @@ func newTestConnWithWG(mut ...func(*Config, *mockAthenaClient)) *Connection {
 	cfg := NewNoOpsConfig()
 	_ = cfg.SetOutputBucket("s3://fake-query-results-arbitrary-bucket/")
 	_ = cfg.SetRegion("us-east-1")
-	cfg.SetUser("henry.wu")
-	cfg.SetDB("default")
+	cfg.User = "henry.wu"
+	cfg.DB = "default"
 
 	wgTags := NewWGTags()
 	wgTags.AddTag("Uber User", "henry.wu")
@@ -45,6 +46,7 @@ func newTestConnWithWG(mut ...func(*Config, *mockAthenaClient)) *Connection {
 	c := &Connection{
 		athenaClient: nm,
 		connector:    NoopsSQLConnector(),
+		tracer:       NewObservability(NewNoOpsConfig(), nil, nil),
 	}
 	c.connector.config = cfg
 	return c
@@ -52,7 +54,7 @@ func newTestConnWithWG(mut ...func(*Config, *mockAthenaClient)) *Connection {
 
 func TestReadOnly_WriteRejection(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetReadOnly(true)
+	testConf.ReadOnly = true
 	db, _ := sql.Open(DriverName, testConf.Stringify())
 	const wantErr = "writing to Athena database is disallowed in read-only mode"
 
@@ -104,7 +106,6 @@ func TestConnection_Prepare(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, err := connector.Connect(context.Background())
@@ -124,7 +125,6 @@ func TestConnection_Close(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, err := connector.Connect(context.Background())
@@ -198,10 +198,10 @@ func TestConnection_InterpolateParams_Query2(t *testing.T) {
 func TestConnection_InterpolateParams_Bool(t *testing.T) {
 	c := createTestConnection(t)
 	q, err := c.interpolateParams("?", []driver.Value{true})
-	assert.Equal(t, "1", q)
+	assert.Equal(t, "true", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{false})
-	assert.Equal(t, "0", q)
+	assert.Equal(t, "false", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{int64(1)})
 	assert.Equal(t, "1", q)
@@ -212,6 +212,12 @@ func TestConnection_InterpolateParams_Bool(t *testing.T) {
 	q, err = c.interpolateParams("?", []driver.Value{float64(1.1)})
 	assert.Equal(t, "1.1", q)
 	assert.Nil(t, err)
+	// NaN/Inf render as the bare words NaN/+Inf/-Inf, not valid Trino
+	// numeric-literal syntax: must error client-side, not send malformed SQL.
+	for _, f := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		_, err = c.interpolateParams("?", []driver.Value{f})
+		assert.Error(t, err, "want error for non-finite float %v", f)
+	}
 	q, err = c.interpolateParams("?", []driver.Value{time.Time{}})
 	assert.Equal(t, "'0000-00-00'", q)
 	assert.Nil(t, err)
@@ -311,7 +317,7 @@ func TestBuildExecutionParams(t *testing.T) {
 			name:        "Bool",
 			inputArgs:   []driver.Value{true, false},
 			expectedErr: nil,
-			expected:    []string{"1", "0"},
+			expected:    []string{"true", "false"},
 		},
 		{
 			name:        "Zero-value time",
@@ -373,7 +379,7 @@ func TestBuildExecutionParams(t *testing.T) {
 			inputArgs: []driver.Value{int64(-10), uint64(42), 1.23, true, testTime, []byte("This is a slice of bytes"),
 				"This is a string"},
 			expectedErr: nil,
-			expected:    []string{"-10", "42", "1.23", "1", "'2024-07-01 00:00:00'", "This is a slice of bytes", "This is a string"},
+			expected:    []string{"-10", "42", "1.23", "true", "'2024-07-01 00:00:00'", "This is a slice of bytes", "This is a string"},
 		},
 	}
 	c := createTestConnection(t)
@@ -390,6 +396,17 @@ func TestBuildExecutionParams(t *testing.T) {
 	}
 }
 
+// TestBuildExecutionParams_RejectsNonFiniteFloats pins a client-side error
+// for NaN/+Inf/-Inf: these render as bare words that aren't valid Trino
+// numeric literals, so letting them through would send malformed SQL.
+func TestBuildExecutionParams_RejectsNonFiniteFloats(t *testing.T) {
+	c := createTestConnection(t)
+	for _, f := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
+		_, err := c.buildExecutionParams([]driver.Value{f})
+		assert.Error(t, err, "want error for non-finite float %v", f)
+	}
+}
+
 func TestCheckNamedValue(t *testing.T) {
 	c := createTestConnection(t)
 	value := driver.NamedValue{Value: uint64(0)}
@@ -401,17 +418,18 @@ func TestCheckNamedValue(t *testing.T) {
 func createTestConnection(t *testing.T) *Connection {
 	t.Parallel()
 	testConf := NewNoOpsConfig()
-	staticCredentials := credentials.NewStaticCredentialsProvider(testConf.GetAccessID(),
-		testConf.GetSecretAccessKey(),
-		testConf.GetSessionToken())
+	staticCredentials := credentials.NewStaticCredentialsProvider(testConf.AccessIDOrEnv(),
+		testConf.SecretAccessKeyOrEnv(),
+		testConf.SessionTokenOrEnv())
 	awsConfig := aws.Config{
-		Region:      testConf.GetRegion(),
+		Region:      testConf.RegionOrEnv(),
 		Credentials: staticCredentials,
 	}
 	athenaClient := athena.NewFromConfig(awsConfig)
 	c := &Connection{
 		athenaClient: athenaClient,
 		connector:    NoopsSQLConnector(),
+		tracer:       NewObservability(NewNoOpsConfig(), nil, nil),
 	}
 	return c
 }
@@ -421,6 +439,7 @@ func TestConnection_QueryContext2(t *testing.T) {
 	c := &Connection{
 		athenaClient: newMockAthenaClient(),
 		connector:    NoopsSQLConnector(),
+		tracer:       NewObservability(NewNoOpsConfig(), nil, nil),
 	}
 	driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error",
 		[]driver.NamedValue{})
@@ -465,7 +484,7 @@ func TestConnection_QueryContext_WorkgroupVariants(t *testing.T) {
 		{
 			name: "remote WG creation disallowed",
 			mutate: func(cfg *Config, _ *mockAthenaClient) {
-				cfg.SetWGRemoteCreationAllowed(false)
+				cfg.WGRemoteCreation = false
 			},
 			ping: driver.ErrBadConn,
 		},
@@ -591,18 +610,21 @@ func TestConnection_QueryContext7(t *testing.T) {
 }
 
 func BenchmarkConnection_QueryContext(b *testing.B) {
-	for range 10000 {
-		c := createConnectionFixture()
-		assert.Nil(b, c.Ping(context.Background()))
+	c := createConnectionFixture()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if err := c.Ping(context.Background()); err != nil {
+			b.Fatal(err)
+		}
 	}
 }
 
 func createConnectionFixture() *Connection {
-	rand.Seed(int64(time.Now().Nanosecond()))
 	nm := newMockAthenaClient()
 	c := &Connection{
 		athenaClient: nm,
 		connector:    NoopsSQLConnector(),
+		tracer:       NewObservability(NewNoOpsConfig(), nil, nil),
 	}
 	var s3bucket string = "s3://fake-query-results-arbitrary-bucket/"
 	wgTags := NewWGTags()
@@ -612,9 +634,9 @@ func createConnectionFixture() *Connection {
 	testConf := NewNoOpsConfig()
 	_ = testConf.SetOutputBucket(s3bucket)
 	_ = testConf.SetRegion(regions[rand.Int31n(int32(len(regions)))])
-	testConf.SetUser("henry.wu")
-	testConf.SetDB(randString(8)) // default
-	testConf.SetWGRemoteCreationAllowed(true)
+	testConf.User = "henry.wu"
+	testConf.DB = randString(8) // default
+	testConf.WGRemoteCreation = true
 	nm.CreateWGStatus = true
 
 	_ = testConf.SetWorkGroup(wg)
@@ -631,7 +653,7 @@ func TestMoneyWise(t *testing.T) {
 		wgTags.AddTag("Uber User", "henry.wu")
 		wgTags.AddTag("Uber Asset", "abc.efg")
 		_ = cfg.SetWorkGroup(NewWG(DefaultWGName, nil, wgTags))
-		cfg.SetMoneyWise(true)
+		cfg.MoneyWise = true
 	})
 	query := "SELECTExecContext_OK"
 	dr, er := c.ExecContext(context.Background(), query, []driver.NamedValue{})
@@ -665,7 +687,7 @@ func TestConnection_CachedQuery(t *testing.T) {
 		// so reset the WG name to fall through quickly. Moneywise mode is
 		// what this test really exercises.
 		_ = cfg.SetWorkGroup(NewWG("", nil, nil))
-		cfg.SetMoneyWise(true)
+		cfg.MoneyWise = true
 	})
 	dr, er := c.ExecContext(context.Background(),
 		"00000000-0000-0000-0000-000000000000", []driver.NamedValue{})
@@ -680,7 +702,7 @@ func Test_PseudoCommand(t *testing.T) {
 		wgTags.AddTag("Uber User", "henry.wu")
 		wgTags.AddTag("Uber Asset", "abc.efg")
 		_ = cfg.SetWorkGroup(NewWG(DefaultWGName, nil, wgTags))
-		cfg.SetMoneyWise(true)
+		cfg.MoneyWise = true
 	})
 
 	query := "pc:get_query_id"

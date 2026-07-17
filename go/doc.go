@@ -57,7 +57,7 @@
 // explicitly opt in via LoggerKey above.
 //
 // To silence the driver after a logger has been wired in, call
-// Config.SetLogging(false). This short-circuits DriverTracer.Log before
+// Config.LoggingEnabled = false. This short-circuits DriverTracer.Log before
 // attrs are formatted and forces Logger() to return the discard logger,
 // regardless of what was passed via LoggerKey. It is the hard kill-switch.
 package athenadriver

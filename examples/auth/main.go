@@ -86,7 +86,7 @@ func useAWSCLIConfigForAuthProfileByManualSetup(profile string) {
 	if err != nil {
 		return
 	}
-	conf.SetAWSProfile(profile)
+	conf.AWSProfile = profile
 	// 2. Open Connection.
 	db, _ := sql.Open(drv.DriverName, conf.Stringify())
 	// 3. Query and print results

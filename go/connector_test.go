@@ -19,7 +19,6 @@ func TestSQLConnector(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, err := connector.Connect(context.Background())
@@ -37,7 +36,6 @@ func TestSQLConnector_Connect(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -63,7 +61,6 @@ func TestSQLConnector_Connect_NewSessionFail(t *testing.T) {
 	os.Setenv("AWS_STS_REGIONAL_ENDPOINTS", "123")
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 	conn, err := connector.Connect(context.Background())
 	tx, err := conn.Begin()
@@ -80,7 +77,6 @@ func TestSQLConnector_Connect_NewSession_AWS_SDK_LOAD_CONFIG_true(t *testing.T) 
 	os.Setenv("AWS_SDK_LOAD_CONFIG", "true")
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 	conn, err := connector.Connect(context.Background())
 
@@ -92,11 +88,10 @@ func TestSQLConnector_Connect_NewSession_AWS_SDK_LOAD_CONFIG_true(t *testing.T) 
 func TestSQLConnector_Connect_NewSession_AWS_SDK_LOAD_CONFIG_true_AWSProfile_Set(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	_ = testConf.SetRegion("ap-southeast-1")
-	testConf.SetAWSProfile("hello-profile")
+	testConf.AWSProfile = "hello-profile"
 	os.Setenv("AWS_SDK_LOAD_CONFIG", "true")
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 	conn, err := connector.Connect(context.Background())
 
@@ -112,7 +107,6 @@ func TestSQLConnector_Connect_NewSession_AWS_SDK_LOAD_CONFIG_false(t *testing.T)
 	os.Setenv("AWS_SDK_LOAD_CONFIG", "0")
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 	conn, err := connector.Connect(context.Background())
 
@@ -128,7 +122,6 @@ func TestSQLConnector_Connect_NewSession_Credentials(t *testing.T) {
 	_ = testConf.SetSecretAccessKey("testkey")
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, err := connector.Connect(context.Background())
@@ -141,7 +134,6 @@ func TestSQLConnector_Driver(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 	assert.NotNil(t, connector.Driver())
 }

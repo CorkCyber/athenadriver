@@ -24,42 +24,39 @@ import (
 type Connection struct {
 	athenaClient AthenaClient
 	connector    *SQLConnector
+	// tracer is owned per-connection so concurrent Connect() calls do not
+	// race by mutating a shared tracer on the connector.
+	tracer *DriverTracer
 }
 
 // ExecContext executes a query that doesn't return rows, such as an INSERT or UPDATE.
+// Delegates to QueryContext so parameterized statements take Athena's
+// ExecutionParameters path (no client-side interpolation) and workgroup /
+// catalog / poll logic stays in one place. UpdateCount is available on the
+// first page of results, so the extra GetQueryResults round-trip that
+// NewRows makes is unavoidable for DML.
 func (c *Connection) ExecContext(ctx context.Context, query string, namedArgs []driver.NamedValue) (driver.Result, error) {
 	if c.athenaClient == nil {
 		return nil, driver.ErrBadConn
 	}
-	var obs = c.connector.tracer
-	var err error
-	args := namedValueToValue(namedArgs)
 	if len(namedArgs) > 0 {
-		query, err = c.interpolateParams(query, args)
-		if err != nil {
-			return nil, err
-		}
-		obs.Scope().Counter(DriverName + ".execcontext").Inc(1)
+		c.tracer.Scope().Counter(DriverName + ".execcontext").Inc(1)
 	}
-	if !isQueryValid(query) {
-		return nil, ErrInvalidQuery
-	}
-	rows, err := c.QueryContext(ctx, query, []driver.NamedValue{})
+	rows, err := c.QueryContext(ctx, query, namedArgs)
 	if err != nil {
 		return nil, err
 	}
-	var rowAffected int64 = 0
-	r := rows.(*Rows)
-	if r != nil && r.ResultOutput != nil && r.ResultOutput.UpdateCount != nil {
+	var rowAffected int64
+	if r, ok := rows.(*Rows); ok && r != nil && r.ResultOutput != nil && r.ResultOutput.UpdateCount != nil {
 		rowAffected = *r.ResultOutput.UpdateCount
 	}
 	return AthenaResult{rowAffected: rowAffected}, nil
 }
 
 func (c *Connection) cachedQuery(ctx context.Context, QID string) (driver.Rows, error) {
-	if c.connector.config.IsMoneyWise() {
+	if c.connector.config.MoneyWise {
 		dataScanned := int64(0)
-		printCost(c.connector.config.GetRegion(), &athena.GetQueryExecutionOutput{
+		printCost(c.connector.config.RegionOrEnv(), &athena.GetQueryExecutionOutput{
 			QueryExecution: &athenatypes.QueryExecution{
 				QueryExecutionId: &QID,
 				Statistics: &athenatypes.QueryExecutionStatistics{
@@ -68,22 +65,20 @@ func (c *Connection) cachedQuery(ctx context.Context, QID string) (driver.Rows, 
 			},
 		})
 	}
-	wg := c.connector.config.GetWorkgroup()
-	if wg.Name == "" {
-		wg.Name = DefaultWGName
-	}
-	return NewRows(ctx, c.athenaClient, QID, c.connector.config, c.connector.tracer)
+	return NewRows(ctx, c.athenaClient, QID, c.connector.config, c.tracer)
 }
 
 func (c *Connection) getHeaderlessSingleRowResultPage(ctx context.Context, qid string) (driver.Rows, error) {
-	r, err := NewNonOpsRows(ctx, c.athenaClient, qid, c.connector.config, c.connector.tracer)
-	colName := "_col0"
-	columnNames := []string{colName}
-	columnTypes := []string{"string"}
-	data := make([][]*string, 1)
-	data[0] = []*string{&qid}
-	r.ResultOutput = newHeaderlessResultPage(columnNames, columnTypes, data)
-	return r, err
+	r := &Rows{
+		athena:    c.athenaClient,
+		ctx:       ctx,
+		queryID:   qid,
+		config:    c.connector.config,
+		tracer:    c.tracer,
+		pageCount: -1,
+	}
+	r.ResultOutput = newHeaderlessResultPage([]string{"_col0"}, []string{"string"}, [][]*string{{&qid}})
+	return r, nil
 }
 
 // QueryContext is implemented to be called by `DB.Query` (QueryerContext interface).
@@ -100,7 +95,7 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 	if c.athenaClient == nil {
 		return nil, driver.ErrBadConn
 	}
-	var obs = c.connector.tracer
+	var obs = c.tracer
 	pseudoCommand, remaining, immediate, err := c.parsePseudoCommand(ctx, query)
 	if err != nil {
 		return nil, err
@@ -109,7 +104,7 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 		return immediate, nil
 	}
 	query = remaining
-	if c.connector.config.IsReadOnly() {
+	if c.connector.config.ReadOnly {
 		if !isReadOnlyStatement(query) {
 			obs.Scope().Counter(DriverName + ".failure.querycontext.writeviolation").Inc(1)
 			obs.Log(WarnLevel, "write db violation", slog.String("query", query))
@@ -118,11 +113,21 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 	}
 	now := time.Now()
 	args := namedValueToValue(namedArgs)
-	queryWithPlaceholders := query // For parameterized queries
+	// Athena receives the placeholder-form query plus ExecutionParameters —
+	// but only for statement shapes the API supports (SELECT / INSERT /
+	// CTAS / UNLOAD / WITH). Anything else (ALTER, MSCK, DROP, plain
+	// CREATE, ...) is rejected server-side with ExecutionParameters set,
+	// so those are interpolated client-side and submitted parameterless.
+	// Length validation gates on whichever form actually goes to Athena
+	// (what counts against the 262 KiB query cap).
 	if len(namedArgs) > 0 {
-		query, err = c.interpolateParams(query, args)
-		if err != nil {
-			return nil, err
+		interpolated, ierr := c.interpolateParams(query, args)
+		if ierr != nil {
+			return nil, ierr
+		}
+		if !executionParamsSupported(query) {
+			query = interpolated
+			args = nil
 		}
 		obs.Scope().Counter(DriverName + ".prepared.querycontext").Inc(1)
 	}
@@ -177,10 +182,10 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 	}
 	catalog := stringFromContext(ctx, CatalogKey)
 	if catalog == "" {
-		catalog = c.connector.config.GetCatalog()
+		catalog = c.connector.config.CatalogOrDefault()
 	}
 	queryExecCtx := &athenatypes.QueryExecutionContext{
-		Database: aws.String(c.connector.config.GetDB()),
+		Database: aws.String(c.connector.config.DB),
 		Catalog:  aws.String(catalog),
 	}
 	requestToken := stringFromContext(ctx, ClientRequestTokenKey)
@@ -188,22 +193,22 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 		requestToken = newClientRequestToken()
 	}
 	resultCfg := &athenatypes.ResultConfiguration{
-		OutputLocation: aws.String(c.connector.config.GetOutputBucket()),
+		OutputLocation: aws.String(c.connector.config.OutputBucket()),
 	}
 	if enc := resultEncryptionFromContext(ctx); enc != nil {
 		resultCfg.EncryptionConfiguration = enc
-	} else if enc := c.connector.config.GetResultEncryption(); enc != nil {
+	} else if enc := c.connector.config.ResultEncryption; enc != nil {
 		resultCfg.EncryptionConfiguration = enc
 	}
 	bucketOwner := stringFromContext(ctx, ExpectedBucketOwnerKey)
 	if bucketOwner == "" {
-		bucketOwner = c.connector.config.GetExpectedBucketOwner()
+		bucketOwner = c.connector.config.ExpectedBucketOwner
 	}
 	if bucketOwner != "" {
 		resultCfg.ExpectedBucketOwner = aws.String(bucketOwner)
 	}
 	resp, err := c.athenaClient.StartQueryExecution(ctx, &athena.StartQueryExecutionInput{
-		QueryString:              aws.String(queryWithPlaceholders),
+		QueryString:              aws.String(query),
 		ExecutionParameters:      executionParams,
 		ClientRequestToken:       aws.String(requestToken),
 		QueryExecutionContext:    queryExecCtx,
@@ -268,8 +273,11 @@ func (c *Connection) parsePseudoCommand(ctx context.Context, query string) (cmd,
 // and the Config opts into remote creation. The default workgroup
 // (DefaultWGName) is assumed to exist and is not validated.
 func (c *Connection) resolveWorkgroup(ctx context.Context) (Workgroup, error) {
-	obs := c.connector.tracer
-	wg := c.connector.config.GetWorkgroup()
+	obs := c.tracer
+	var wg Workgroup
+	if c.connector.config.WorkGroup != nil {
+		wg = *c.connector.config.WorkGroup
+	}
 	if wg.Name == "" {
 		wg.Name = DefaultWGName
 		return wg, nil
@@ -285,9 +293,9 @@ func (c *Connection) resolveWorkgroup(ctx context.Context) (Workgroup, error) {
 		if errors.As(err, &re) && !strings.Contains(err.Error(), "WorkGroup is not found.") {
 			return wg, err
 		}
-		if !c.connector.config.IsWGRemoteCreationAllowed() {
+		if !c.connector.config.WGRemoteCreation {
 			obs.Log(WarnLevel, "workgroup "+DefaultWGName+" is used for "+wg.Name+".")
-			return wg, fmt.Errorf("workgroup %q doesn't exist and workgroup remote creation is disabled, due to: %v", wg.Name, err.Error())
+			return wg, fmt.Errorf("workgroup %q doesn't exist and workgroup remote creation is disabled: %w", wg.Name, err)
 		}
 		if err := wg.CreateWGRemotely(ctx, c.athenaClient); err != nil {
 			obs.Scope().Counter(DriverName + ".failure.querycontext.createwgremotely").Inc(1)

@@ -36,14 +36,13 @@ var (
 
 // athenaTypeMeta describes how the driver surfaces a single Athena column
 // type to database/sql callers: the reflect.Type returned from
-// RowsColumnTypeScanType, and the zero value handed back when
-// MissingAsDefault is enabled and a row has no value for the column.
-//
-// The parse step (string -> Go value) lives in athenaTypeToGoType because
-// each Athena type needs its own width/format handling.
+// RowsColumnTypeScanType, the zero value handed back when
+// MissingAsDefault is enabled and a row has no value for the column, and
+// the parse step (string -> Go value).
 type athenaTypeMeta struct {
 	scanType   reflect.Type
 	defaultVal any
+	parse      func(string) (any, error)
 }
 
 // athenaTypes is the single source of truth for Athena column types the
@@ -52,39 +51,93 @@ type athenaTypeMeta struct {
 // same key set. Types listed here as scanTypeString are returned to
 // database/sql as Go strings (Athena's text-shaped types and anything the
 // driver does not specially decode).
+func parseIntBits(bits int) func(string) (any, error) {
+	return func(s string) (any, error) {
+		n, err := strconv.ParseInt(s, 10, bits)
+		if err != nil {
+			return nil, err
+		}
+		switch bits {
+		case 8:
+			return int8(n), nil
+		case 16:
+			return int16(n), nil
+		case 32:
+			return int32(n), nil
+		}
+		return n, nil
+	}
+}
+
+func parseFloatBits(bits int) func(string) (any, error) {
+	return func(s string) (any, error) {
+		f, err := strconv.ParseFloat(s, bits)
+		if err != nil {
+			return nil, err
+		}
+		if bits == 32 {
+			return float32(f), nil
+		}
+		return f, nil
+	}
+}
+
+func parseBool(s string) (any, error) {
+	switch s {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	}
+	return nil, fmt.Errorf("unknown value `%s` for boolean", s)
+}
+
+func parseTime(s string) (any, error) {
+	vv, err := scanTime(s)
+	if !vv.Valid {
+		return nil, err
+	}
+	return vv.Time, err
+}
+
+func parseString(s string) (any, error) { return s, nil }
+
+var timeMeta = athenaTypeMeta{scanTypeTime, time.Time{}, parseTime}
+var stringMeta = athenaTypeMeta{scanTypeString, "", parseString}
+
 var athenaTypes = map[string]athenaTypeMeta{
-	"tinyint":  {scanTypeInt8, 0},
-	"smallint": {scanTypeInt16, 0},
-	"integer":  {scanTypeInt32, 0},
-	"bigint":   {scanTypeInt64, 0},
+	"tinyint":  {scanTypeInt8, 0, parseIntBits(8)},
+	"smallint": {scanTypeInt16, 0, parseIntBits(16)},
+	"integer":  {scanTypeInt32, 0, parseIntBits(32)},
+	"bigint":   {scanTypeInt64, 0, parseIntBits(64)},
 
-	"float":  {scanTypeFloat32, 0.0},
-	"real":   {scanTypeFloat32, 0.0},
-	"double": {scanTypeFloat64, 0.0},
+	"float":  {scanTypeFloat32, 0.0, parseFloatBits(32)},
+	"real":   {scanTypeFloat32, 0.0, parseFloatBits(32)},
+	"double": {scanTypeFloat64, 0.0, parseFloatBits(64)},
 
-	"boolean": {scanTypeBool, false},
+	"boolean": {scanTypeBool, false, parseBool},
 
-	"date":                     {scanTypeTime, time.Time{}},
-	"time":                     {scanTypeTime, time.Time{}},
-	"time with time zone":      {scanTypeTime, time.Time{}},
-	"timestamp":                {scanTypeTime, time.Time{}},
-	"timestamp with time zone": {scanTypeTime, time.Time{}},
+	"date":                     timeMeta,
+	"time":                     timeMeta,
+	"time with time zone":      timeMeta,
+	"timestamp":                timeMeta,
+	"timestamp with time zone": timeMeta,
 
-	"json":                   {scanTypeString, ""},
-	"char":                   {scanTypeString, ""},
-	"varchar":                {scanTypeString, ""},
-	"varbinary":              {scanTypeString, ""},
-	"row":                    {scanTypeString, ""},
-	"string":                 {scanTypeString, ""},
-	"binary":                 {scanTypeString, ""},
-	"struct":                 {scanTypeString, ""},
-	"interval year to month": {scanTypeString, ""},
-	"interval day to second": {scanTypeString, ""},
-	"decimal":                {scanTypeString, ""},
-	"ipaddress":              {scanTypeString, ""},
-	"array":                  {scanTypeString, ""},
-	"map":                    {scanTypeString, ""},
-	"unknown":                {scanTypeString, ""},
+	"json":                   stringMeta,
+	"char":                   stringMeta,
+	"varchar":                stringMeta,
+	"varbinary":              stringMeta,
+	"row":                    stringMeta,
+	"string":                 stringMeta,
+	"binary":                 stringMeta,
+	"struct":                 stringMeta,
+	"interval year to month": stringMeta,
+	"interval day to second": stringMeta,
+	"decimal":                stringMeta,
+	"ipaddress":              stringMeta,
+	"array":                  stringMeta,
+	"map":                    stringMeta,
+	"unknown":                stringMeta,
 }
 
 // Rows defines rows in AWS Athena ResultSet.
@@ -98,6 +151,11 @@ type Rows struct {
 	tracer          *DriverTracer
 	pageCount       int64
 	paginator       *athena.GetQueryResultsPaginator
+	// colMetas is a per-column decoder lookup indexed by column position,
+	// built once from the first page's ColumnInfo. Avoids a per-cell
+	// map lookup + string-switch on *columnInfo.Type. nil entries fall
+	// back to the "unknown type" error path.
+	colMetas []*athenaTypeMeta
 	// queryExecution is the terminal-state QueryExecution returned by
 	// GetQueryExecution at the end of the polling loop. Used by the
 	// StatementType / SubstatementType accessors and any caller that needs
@@ -130,20 +188,6 @@ func (r *Rows) SubstatementType() string {
 		return ""
 	}
 	return *r.queryExecution.SubstatementType
-}
-
-// NewNonOpsRows is to create a new Rows.
-func NewNonOpsRows(ctx context.Context, client AthenaClient, queryID string, driverConfig *Config,
-	obs *DriverTracer) (*Rows, error) {
-	r := Rows{
-		athena:    client,
-		ctx:       ctx,
-		queryID:   queryID,
-		config:    driverConfig,
-		tracer:    obs,
-		pageCount: -1,
-	}
-	return &r, nil
 }
 
 // NewRows is to create a new Rows.
@@ -366,11 +410,29 @@ func (r *Rows) Close() error {
 	return nil
 }
 
+// buildColMetas populates the per-column decoder cache from the current
+// page's ColumnInfo. Called once per Rows the first time a decode
+// happens (colMetas is nil).
+func (r *Rows) buildColMetas(columns []athenatypes.ColumnInfo) {
+	r.colMetas = make([]*athenaTypeMeta, len(columns))
+	for i, c := range columns {
+		if c.Type == nil {
+			continue
+		}
+		if m, ok := athenaTypes[*c.Type]; ok {
+			r.colMetas[i] = &m
+		}
+	}
+}
+
 // convertRow is to convert data from Athena type to Golang SQL type and put them into an array of driver.Value.
 func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.Datum, ret []driver.Value,
 	driverConfig *Config) error {
+	if r.colMetas == nil {
+		r.buildColMetas(columns)
+	}
 	for i, val := range rdata {
-		value, err := r.athenaTypeToGoType(columns[i], val.VarCharValue, driverConfig)
+		value, err := r.convertCell(columns[i], r.colMetas[i], val.VarCharValue, driverConfig)
 		if err != nil {
 			r.tracer.Log(ErrorLevel, "convertrow failed", slog.String("error", err.Error()))
 			r.tracer.Scope().Counter(DriverName + ".failure.convertrow").Inc(1)
@@ -392,6 +454,16 @@ func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.
 // The full list is here: https://prestodb.io/docs/0.172/language/types.html
 // Include ipaddress for forward compatibility.
 func (r *Rows) athenaTypeToGoType(columnInfo athenatypes.ColumnInfo, rawValue *string, driverConfig *Config) (any, error) {
+	var meta *athenaTypeMeta
+	if columnInfo.Type != nil {
+		if m, ok := athenaTypes[*columnInfo.Type]; ok {
+			meta = &m
+		}
+	}
+	return r.convertCell(columnInfo, meta, rawValue, driverConfig)
+}
+
+func (r *Rows) convertCell(columnInfo athenatypes.ColumnInfo, meta *athenaTypeMeta, rawValue *string, driverConfig *Config) (any, error) {
 	if maskedValue, masked := driverConfig.CheckColumnMasked(*columnInfo.Name); masked { // "comma ok" idiom
 		return maskedValue, nil
 	}
@@ -400,88 +472,41 @@ func (r *Rows) athenaTypeToGoType(columnInfo athenatypes.ColumnInfo, rawValue *s
 		r.tracer.Log(ErrorLevel, "missing data",
 			slog.String("columnInfo.Name", *columnInfo.Name),
 			slog.String("queryID", r.queryID),
-			slog.String("workgroup", driverConfig.GetWorkgroup().Name))
-		if driverConfig.IsMissingAsNil() {
+			slog.String("workgroup", workgroupName(driverConfig)))
+		if driverConfig.MissingAsNil {
 			return nil, nil
-		} else if driverConfig.IsMissingAsEmptyString() {
+		} else if driverConfig.MissingAsEmptyString {
 			return "", nil
-		} else if driverConfig.IsMissingAsDefault() {
+		} else if driverConfig.MissingAsDefault {
 			return r.getDefaultValueForColumnType(*columnInfo.Type), nil
 		}
 		r.tracer.Scope().Counter(DriverName + ".failure.convertvalue.config").Inc(1)
 		r.tracer.Log(ErrorLevel, "missing data", slog.String("columnInfo.Name", *columnInfo.Name))
 		return nil, fmt.Errorf("missing data at column %s", *columnInfo.Name)
 	}
-	val := *rawValue
-	// https://stackoverflow.com/questions/30299649/parse-string-to-specific-type-of-int-int8-int16-int32-int64
-	// https://prestodb.io/docs/current/language/types.html#integer
-	var err error
-	var i int64
-	var f float64
-	switch *columnInfo.Type {
-	case "tinyint":
-		// strconv.ParseInt() behavior is to return (int64(0), err)
-		// which is not as good as just return (nil, err)
-		if i, err = strconv.ParseInt(val, 10, 8); err != nil {
-			return nil, err
-		}
-		return int8(i), nil
-	case "smallint":
-		if i, err = strconv.ParseInt(val, 10, 16); err != nil {
-			return nil, err
-		}
-		return int16(i), nil
-	case "integer":
-		if i, err = strconv.ParseInt(val, 10, 32); err != nil {
-			return nil, err
-		}
-		return int32(i), nil
-	case "bigint":
-		if i, err = strconv.ParseInt(val, 10, 64); err != nil {
-			return nil, err
-		}
-		return i, nil
-	case "float", "real":
-		if f, err = strconv.ParseFloat(val, 32); err != nil {
-			return nil, err
-		}
-		return float32(f), nil
-	case "double":
-		if f, err = strconv.ParseFloat(val, 64); err != nil {
-			return nil, err
-		}
-		return f, nil
-	// for binary, we assume all chars are 0 or 1; for json,
-	// we assume the json syntax is correct. Leave to caller to verify it.
-	case "json", "char", "varchar", "varbinary", "row", "string", "binary",
-		"struct", "interval year to month", "interval day to second", "decimal",
-		"ipaddress", "array", "map", "unknown":
-		return val, nil
-	case "boolean":
-		if val == "true" {
-			return true, nil
-		} else if val == "false" {
-			return false, nil
-		}
-		r.tracer.Scope().Counter(DriverName + ".failure.convertvalue.boolean").Inc(1)
-		r.tracer.Log(ErrorLevel, "boolean data error", slog.String("val", val))
-		return nil, fmt.Errorf("unknown value `%s` for boolean", val)
-	case "date", "time", "time with time zone", "timestamp", "timestamp with time zone":
-		vv, err := scanTime(val)
-		if !vv.Valid {
-			r.tracer.Scope().Counter(DriverName + ".failure.convertvalue." +
-				"time").Inc(1)
-			r.tracer.Log(ErrorLevel, "time data error",
-				slog.String("val", val),
-				slog.String("type", *columnInfo.Type))
-			return nil, err
-		}
-		return vv.Time, err
-	default:
+	if meta == nil {
 		r.tracer.Scope().Counter(DriverName + ".failure.convertvalue.type").Inc(1)
-		r.tracer.Log(ErrorLevel, "column data type error", slog.String("columnInfo.Type", *columnInfo.Type))
-		return nil, fmt.Errorf("unknown type `%s` with value %s", *columnInfo.Type, val)
+		typeName := ""
+		if columnInfo.Type != nil {
+			typeName = *columnInfo.Type
+		}
+		r.tracer.Log(ErrorLevel, "column data type error", slog.String("columnInfo.Type", typeName))
+		return nil, fmt.Errorf("unknown type `%s` with value %s", typeName, *rawValue)
 	}
+	val, err := meta.parse(*rawValue)
+	if err != nil {
+		bucket := "convertvalue"
+		if columnInfo.Type != nil {
+			switch *columnInfo.Type {
+			case "boolean":
+				bucket = "convertvalue.boolean"
+			case "date", "time", "time with time zone", "timestamp", "timestamp with time zone":
+				bucket = "convertvalue.time"
+			}
+		}
+		r.tracer.Scope().Counter(DriverName + ".failure." + bucket).Inc(1)
+	}
+	return val, err
 }
 
 // getDefaultValueForColumnType is used internally by athenaTypeToGoType to

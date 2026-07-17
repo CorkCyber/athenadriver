@@ -24,7 +24,6 @@ import (
 // SQLConnector is the connector for AWS Athena Driver.
 type SQLConnector struct {
 	config *Config
-	tracer *DriverTracer
 	// awsConfig is an optional caller-supplied aws.Config used verbatim
 	// instead of the DSN-driven credential resolution. Lets callers wire
 	// up IMDS/IRSA/SSO/OIDC/assume-role chains, custom retryers, or any
@@ -34,10 +33,12 @@ type SQLConnector struct {
 }
 
 // NewConnector returns a SQLConnector for the given DSN-parsed Config.
-// Callers that need to drive credential resolution themselves should
-// chain WithAWSConfig.
+// The Config is copied at construction: mutating cfg afterwards does not
+// affect (or race with) connections the connector produces. Callers that
+// need to drive credential resolution themselves should chain
+// WithAWSConfig.
 func NewConnector(cfg *Config) *SQLConnector {
-	return &SQLConnector{config: cfg}
+	return &SQLConnector{config: cfg.clone()}
 }
 
 // WithAWSConfig injects a caller-built aws.Config. When set, Connect uses
@@ -54,52 +55,49 @@ func (c *SQLConnector) resolveAWSConfig(ctx context.Context) (aws.Config, error)
 	if c.awsConfig != nil {
 		return *c.awsConfig, nil
 	}
-	profile := c.config.GetAWSProfile()
+	profile := c.config.AWSProfile
 	loadSharedConfig, _ := strconv.ParseBool(os.Getenv("AWS_SDK_LOAD_CONFIG"))
 	if profile != "" || loadSharedConfig {
 		opts := []func(*config.LoadOptions) error{}
 		if profile != "" {
 			opts = append(opts, config.WithSharedConfigProfile(profile))
 		}
-		if region := c.config.GetRegion(); region != "" {
+		if region := c.config.RegionOrEnv(); region != "" {
 			opts = append(opts, config.WithRegion(region))
 		}
 		return config.LoadDefaultConfig(ctx, opts...)
 	}
-	if roleARN, tokenFile, sessionName := c.config.GetWebIdentity(); roleARN != "" && tokenFile != "" {
-		base := aws.Config{Region: c.config.GetRegion()}
+	if c.config.WebIdentityRoleARN != "" && c.config.WebIdentityTokenFile != "" {
+		base := aws.Config{Region: c.config.RegionOrEnv()}
 		stsClient := sts.NewFromConfig(base)
 		provider := stscreds.NewWebIdentityRoleProvider(
-			stsClient, roleARN, stscreds.IdentityTokenFile(tokenFile),
+			stsClient, c.config.WebIdentityRoleARN,
+			stscreds.IdentityTokenFile(c.config.WebIdentityTokenFile),
 			func(o *stscreds.WebIdentityRoleOptions) {
-				if sessionName != "" {
-					o.RoleSessionName = sessionName
+				if c.config.WebIdentityRoleSessionName != "" {
+					o.RoleSessionName = c.config.WebIdentityRoleSessionName
 				}
 			},
 		)
 		base.Credentials = aws.NewCredentialsCache(provider)
 		return base, nil
 	}
-	if c.config.GetAccessID() != "" {
+	if c.config.AccessIDOrEnv() != "" {
 		return aws.Config{
-			Region: c.config.GetRegion(),
+			Region: c.config.RegionOrEnv(),
 			Credentials: credentials.NewStaticCredentialsProvider(
-				c.config.GetAccessID(),
-				c.config.GetSecretAccessKey(),
-				c.config.GetSessionToken(),
+				c.config.AccessIDOrEnv(),
+				c.config.SecretAccessKeyOrEnv(),
+				c.config.SessionTokenOrEnv(),
 			),
 		}, nil
 	}
-	return aws.Config{Region: c.config.GetRegion()}, nil
+	return aws.Config{Region: c.config.RegionOrEnv()}, nil
 }
 
 // NoopsSQLConnector is to create a noops SQLConnector.
 func NoopsSQLConnector() *SQLConnector {
-	noopsConfig := NewNoOpsConfig()
-	return &SQLConnector{
-		config: noopsConfig,
-		tracer: NewDefaultObservability(noopsConfig),
-	}
+	return &SQLConnector{config: NewNoOpsConfig()}
 }
 
 // AthenaClient is an interface to facilitate testing
@@ -124,7 +122,7 @@ func (c *SQLConnector) Driver() driver.Driver {
 // follows this precedence:
 //
 //  1. WithAWSConfig — caller-supplied aws.Config used verbatim.
-//  2. Config.SetAWSProfile, or the AWS_SDK_LOAD_CONFIG env var, triggers
+//  2. Config.AWSProfile, or the AWS_SDK_LOAD_CONFIG env var, triggers
 //     config.LoadDefaultConfig with the configured shared-config profile.
 //     This is the path for ~/.aws/config-driven setups, IRSA / EKS pod
 //     identity, SSO, OIDC, and assume-role chains.
@@ -133,17 +131,19 @@ func (c *SQLConnector) Driver() driver.Driver {
 //     (env vars, IMDS, container creds, etc.).
 func (c *SQLConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	now := time.Now()
-	c.tracer = NewDefaultObservability(c.config)
+	// tracer is per-connection so concurrent Connect() calls do not race
+	// mutating a shared field on the connector.
+	tracer := NewObservability(c.config, nil, nil)
 	if metrics, ok := ctx.Value(MetricsKey).(tally.Scope); ok {
-		c.tracer.SetScope(metrics)
+		tracer.SetScope(metrics)
 	}
 	if logger, ok := ctx.Value(LoggerKey).(*slog.Logger); ok {
-		c.tracer.SetLogger(logger)
+		tracer.SetLogger(logger)
 	}
 
 	awsCfg, err := c.resolveAWSConfig(ctx)
 	if err != nil {
-		c.tracer.Scope().Counter(DriverName + ".failure.sqlconnector.newsession").Inc(1)
+		tracer.Scope().Counter(DriverName + ".failure.sqlconnector.newsession").Inc(1)
 		return nil, err
 	}
 	athenaClient := athena.NewFromConfig(awsCfg)
@@ -151,7 +151,8 @@ func (c *SQLConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	conn := &Connection{
 		athenaClient: athenaClient,
 		connector:    c,
+		tracer:       tracer,
 	}
-	c.tracer.Scope().Timer(DriverName + ".connector.connect").Record(timeConnect)
+	tracer.Scope().Timer(DriverName + ".connector.connect").Record(timeConnect)
 	return conn, nil
 }

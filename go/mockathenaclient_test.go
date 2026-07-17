@@ -50,6 +50,11 @@ type mockAthenaClient struct {
 	CreateWGStatus bool
 	GetWGStatus    bool
 	WGDisabled     bool
+
+	// lastStartInput records the most recent StartQueryExecution input so
+	// tests can assert on the exact QueryString / ExecutionParameters the
+	// driver submitted.
+	lastStartInput *athena.StartQueryExecutionInput
 }
 
 func newMockAthenaClient() *mockAthenaClient {
@@ -151,22 +156,26 @@ func (m *mockAthenaClient) GetWorkGroup(_ context.Context, _ *athena.GetWorkGrou
 // successful StartQueryExecution; the body of the test is then driven by
 // the matching qidStates entry in GetQueryExecution.
 var queryToQID = map[string]string{
-	"select 1":                      "PING_OK_QID",
-	"SELECTExecContext_OK":          "SELECTExecContext_OK_QID",
-	"SELECTQueryContext_OK":         "SELECTQueryContext_OK_QID",
-	"SELECTQueryContext_'OK'":       "SELECTQueryContext_OK_QID",
-	"SELECTQueryContext_?":          "SELECTQueryContext_OK_QID",
-	"SELECTQueryContext_CANCEL_OK":  "SELECTQueryContext_CANCEL_OK_QID",
-	"SELECTQueryContext_AWS_CANCEL": "SELECTQueryContext_AWS_CANCEL_QID",
-	"SELECTQueryContext_AWS_FAIL":   "SELECTQueryContext_AWS_FAIL_QID",
-	"SELECTQueryContext_CANCEL_FAIL": "SELECTQueryContext_CANCEL_FAIL_QID",
-	"SELECTQueryContext_TIMEOUT":    "SELECTQueryContext_TIMEOUT_QID",
+	"select 1":                               "PING_OK_QID",
+	"SELECTExecContext_OK":                   "SELECTExecContext_OK_QID",
+	"SELECTQueryContext_OK":                  "SELECTQueryContext_OK_QID",
+	"SELECTQueryContext_'OK'":                "SELECTQueryContext_OK_QID",
+	"SELECTQueryContext_?":                   "SELECTQueryContext_OK_QID",
+	"SELECTQueryContext_CANCEL_OK":           "SELECTQueryContext_CANCEL_OK_QID",
+	"select ?":                               "PING_OK_QID",
+	"alter table t set location 'x'":         "PING_OK_QID",
+	"SELECTQueryContext_AWS_CANCEL":          "SELECTQueryContext_AWS_CANCEL_QID",
+	"SELECTQueryContext_AWS_FAIL":            "SELECTQueryContext_AWS_FAIL_QID",
+	"SELECTQueryContext_AWS_FAIL_STRUCTURED": "SELECTQueryContext_AWS_FAIL_STRUCTURED_QID",
+	"SELECTQueryContext_CANCEL_FAIL":         "SELECTQueryContext_CANCEL_FAIL_QID",
+	"SELECTQueryContext_TIMEOUT":             "SELECTQueryContext_TIMEOUT_QID",
 	"When_StartQueryExecution_Succeed_but_GetQueryExecutionWithContext_return_nil_and_error": "When_StartQueryExecution_Succeed_but_GetQueryExecutionWithContext_return_nil_and_error_QID",
 	"StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateCancelled":       "QueryExecutionStateCancelled_QID",
 	"StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateFailed":          "QueryExecutionStateFailed_QID",
 }
 
 func (m *mockAthenaClient) StartQueryExecution(_ context.Context, s *athena.StartQueryExecutionInput, _ ...func(options *athena.Options)) (*athena.StartQueryExecutionOutput, error) {
+	m.lastStartInput = s
 	q := *s.QueryString
 	if qid, ok := queryToQID[strings.ToLower(q)]; ok {
 		return &athena.StartQueryExecutionOutput{QueryExecutionId: &qid}, nil
@@ -217,6 +226,17 @@ func withStateChangeReason(r string) qeOpt {
 	return func(e *athenatypes.QueryExecution) { e.Status.StateChangeReason = &r }
 }
 
+func withAthenaError(category, errType int32, retryable bool, msg string) qeOpt {
+	return func(e *athenatypes.QueryExecution) {
+		e.Status.AthenaError = &athenatypes.AthenaError{
+			ErrorCategory: &category,
+			ErrorType:     &errType,
+			Retryable:     retryable,
+			ErrorMessage:  &msg,
+		}
+	}
+}
+
 // qidQueryExecutions is the static side of the GetQueryExecution mock.
 // QIDs that should produce an error from GetQueryExecution live in
 // qidErrors below.
@@ -233,6 +253,9 @@ var qidQueryExecutions = map[string]*athena.GetQueryExecutionOutput{
 		athenatypes.QueryExecutionStateCancelled, withDataScanned(123)),
 	"SELECTQueryContext_AWS_FAIL_QID": qe("SELECTQueryContext_AWS_FAIL_QID",
 		athenatypes.QueryExecutionStateFailed, withStateChangeReason("something_broken")),
+	"SELECTQueryContext_AWS_FAIL_STRUCTURED_QID": qe("SELECTQueryContext_AWS_FAIL_STRUCTURED_QID",
+		athenatypes.QueryExecutionStateFailed,
+		withAthenaError(2, 1001, true, "SYNTAX_ERROR: line 1:8")),
 	"SELECTQueryContext_CANCEL_FAIL_QID": qe("SELECTQueryContext_CANCEL_FAIL_QID",
 		athenatypes.QueryExecutionStateQueued),
 	"SELECTQueryContext_TIMEOUT_QID": qe("SELECTQueryContext_TIMEOUT_QID",

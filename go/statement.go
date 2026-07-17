@@ -16,14 +16,10 @@ type Statement struct {
 	numInput   int
 }
 
-// Close is to close an open statement.
+// Close is to close an open statement. Idempotent per driver.Stmt
+// contract (see golang/go#16019); returning ErrBadConn on the second
+// call causes database/sql to evict the underlying connection.
 func (s *Statement) Close() error {
-	if s.connection == nil || s.closed {
-		// driver.Stmt.Close can be called more than once, thus this function
-		// has to be idempotent.
-		// See also Issue #450 and golang/go#16019.
-		return driver.ErrBadConn
-	}
 	s.query = ""
 	s.closed = true
 	s.numInput = 0
@@ -52,10 +48,8 @@ func (s *Statement) Exec(args []driver.Value) (driver.Result, error) {
 	if s.closed {
 		return nil, driver.ErrBadConn
 	}
-	r, e := s.connection.ExecContext(context.Background(), s.query,
+	return s.connection.ExecContext(context.Background(), s.query,
 		valueToNamedValue(args))
-	s.closed = true
-	return r, e
 }
 
 // Query is to query based on a prepared statement.
@@ -63,10 +57,8 @@ func (s *Statement) Query(args []driver.Value) (driver.Rows, error) {
 	if s.closed {
 		return nil, driver.ErrBadConn
 	}
-	r, e := s.connection.QueryContext(context.Background(), s.query,
+	return s.connection.QueryContext(context.Background(), s.query,
 		valueToNamedValue(args))
-	s.closed = true
-	return r, e
 }
 
 // ExecContext implements driver.StmtExecContext. When the parent Stmt
@@ -77,9 +69,7 @@ func (s *Statement) ExecContext(ctx context.Context, args []driver.NamedValue) (
 	if s.closed {
 		return nil, driver.ErrBadConn
 	}
-	r, e := s.connection.ExecContext(ctx, s.query, args)
-	s.closed = true
-	return r, e
+	return s.connection.ExecContext(ctx, s.query, args)
 }
 
 // QueryContext implements driver.StmtQueryContext.
@@ -87,9 +77,7 @@ func (s *Statement) QueryContext(ctx context.Context, args []driver.NamedValue) 
 	if s.closed {
 		return nil, driver.ErrBadConn
 	}
-	r, e := s.connection.QueryContext(ctx, s.query, args)
-	s.closed = true
-	return r, e
+	return s.connection.QueryContext(ctx, s.query, args)
 }
 
 var _ driver.StmtExecContext = (*Statement)(nil)

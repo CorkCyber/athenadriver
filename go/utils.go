@@ -35,7 +35,9 @@ func ColsToCSV(rows *sql.Rows) string {
 	return s.String()
 }
 
-// RowsToCSV is to convert rows of sql.Rows to CSV format.
+// RowsToCSV is to convert rows of sql.Rows to CSV format. Rows are
+// streamed to the underlying csv.Writer as they are scanned so peak
+// memory stays O(row_width) instead of O(rows).
 func RowsToCSV(rows *sql.Rows) string {
 	if rows == nil {
 		return ""
@@ -43,22 +45,21 @@ func RowsToCSV(rows *sql.Rows) string {
 	columns, _ := rows.Columns()
 	var buf bytes.Buffer
 	csvWriter := csv.NewWriter(&buf)
-	records := make([][]string, 0)
+	rawResult := make([][]byte, len(columns))
+	row := make([]any, len(columns))
+	for i := range rawResult {
+		row[i] = &rawResult[i]
+	}
+	s := make([]string, len(columns))
 	for rows.Next() {
-		rawResult := make([][]byte, len(columns))
-		row := make([]any, len(columns))
-		for i := range rawResult {
-			row[i] = &rawResult[i] // pointers to each string in the interface slice
-		}
-		// We don't consider malformed rows
+		// malformed rows are not surfaced
 		_ = rows.Scan(row...)
-		s := make([]string, len(columns))
 		for i, cell := range rawResult {
 			s[i] = string(cell)
 		}
-		records = append(records, s)
+		_ = csvWriter.Write(s)
 	}
-	csvWriter.WriteAll(records)
+	csvWriter.Flush()
 	return buf.String()
 }
 
@@ -67,6 +68,15 @@ func ColsRowsToCSV(rows *sql.Rows) string {
 	s := ColsToCSV(rows)
 	r := RowsToCSV(rows)
 	return s + r
+}
+
+// workgroupName returns the Config's workgroup name, or "" when no
+// workgroup is attached. Convenient for log attributes.
+func workgroupName(c *Config) string {
+	if c.WorkGroup == nil {
+		return ""
+	}
+	return c.WorkGroup.Name
 }
 
 // readOnlyPrefixes lists the lowercase query prefixes the driver treats as
@@ -82,6 +92,34 @@ func isReadOnlyStatement(query string) bool {
 		}
 	}
 	return IsQID(query)
+}
+
+// executionParamsSupported reports whether Athena's StartQueryExecution
+// accepts `?` placeholders via ExecutionParameters for this statement.
+// Athena supports execution parameters only for SELECT, INSERT INTO,
+// CTAS (CREATE TABLE ... AS SELECT), UNLOAD and WITH statements;
+// parameterized DDL (ALTER, DROP, MSCK, plain CREATE, ...) is rejected
+// server-side and must be interpolated client-side before submission.
+func executionParamsSupported(query string) bool {
+	fields := strings.Fields(strings.ToLower(query))
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "select", "insert", "unload", "with":
+		return true
+	case "create":
+		// Only the CTAS form takes execution parameters; a bare AS
+		// token (reserved word, so never a column/table name) ahead of
+		// the SELECT body distinguishes it from plain CREATE TABLE DDL.
+		for _, f := range fields[1:] {
+			if f == "as" {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func newColumnInfo(colName string, colType any) athenatypes.ColumnInfo {
@@ -247,32 +285,24 @@ func valueToNamedValue(args []driver.Value) []driver.NamedValue {
 }
 
 func isQueryTimeOut(startOfStartQueryExecution time.Time, queryType athenatypes.StatementType, serviceLimitOverride *ServiceLimitOverride) bool {
+	if queryType == "TIMEOUT_NOW" {
+		return true
+	}
 	ddlQueryTimeout := DDLQueryTimeout
 	dmlQueryTimeout := DMLQueryTimeout
 	if serviceLimitOverride != nil {
-		if serviceLimitOverride.GetDDLQueryTimeout() > 0 {
-			ddlQueryTimeout = serviceLimitOverride.GetDDLQueryTimeout()
+		if v := serviceLimitOverride.DDLQueryTimeout; v > 0 {
+			ddlQueryTimeout = v
 		}
-		if serviceLimitOverride.GetDMLQueryTimeout() > 0 {
-			dmlQueryTimeout = serviceLimitOverride.GetDMLQueryTimeout()
+		if v := serviceLimitOverride.DMLQueryTimeout; v > 0 {
+			dmlQueryTimeout = v
 		}
 	}
-	switch queryType {
-	case "DDL":
-		return time.Since(startOfStartQueryExecution) >
-			time.Duration(ddlQueryTimeout)*time.Second
-	case "DML":
-		return time.Since(startOfStartQueryExecution) >
-			time.Duration(dmlQueryTimeout)*time.Second
-	case "UTILITY":
-		return time.Since(startOfStartQueryExecution) >
-			time.Duration(dmlQueryTimeout)*time.Second
-	case "TIMEOUT_NOW":
-		return true
-	default:
-		return time.Since(startOfStartQueryExecution) >
-			time.Duration(ddlQueryTimeout)*time.Second
+	timeout := ddlQueryTimeout
+	if queryType == "DML" || queryType == "UTILITY" {
+		timeout = dmlQueryTimeout
 	}
+	return time.Since(startOfStartQueryExecution) > time.Duration(timeout)*time.Second
 }
 
 // isQueryValid is to check the validity of Query, now only string length check.
@@ -307,7 +337,12 @@ func printCost(region string, o *athena.GetQueryExecutionOutput) {
 			bytes = *o.QueryExecution.Statistics.DataScannedInBytes
 		}
 	}
-	fmt.Printf("query cost: %.20f USD, scanned data: %d B, qid: %s\n",
+	// MoneyWise deliberately prints to stdout (a CLI-facing feature since
+	// v1), not through the slog pipeline — the default driver logger may
+	// be discarded while the user still wants cost output. 10 fractional
+	// digits covers a single byte scanned in the priciest region;
+	// anything past ~15 significant digits is float64 noise anyway.
+	fmt.Printf("query cost: %.10f USD, scanned data: %d B, qid: %s\n",
 		estimateScanCost(region, bytes), bytes, qid)
 }
 

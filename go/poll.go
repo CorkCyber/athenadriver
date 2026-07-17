@@ -4,7 +4,6 @@ package athenadriver
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"time"
 
@@ -21,10 +20,10 @@ import (
 // is the time we issued StartQueryExecution (used for the per-statement
 // timeout); loopStart is used for "time since polling began" metrics.
 func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, query string, queryStart, loopStart time.Time) (*athenatypes.QueryExecution, error) {
-	obs := c.connector.tracer
-	pollInterval := c.connector.config.GetResultPollIntervalSeconds()
-	maxPoll := c.connector.config.GetResultPollMaxInterval()
-	multiplier := c.connector.config.GetResultPollBackoffMultiplier()
+	obs := c.tracer
+	pollInterval := c.connector.config.PollInterval()
+	maxPoll := c.connector.config.PollMaxInterval()
+	multiplier := c.connector.config.PollBackoffMultiplier()
 	// One timer reused across poll iterations. Avoids the per-iteration
 	// allocation + leak of `time.After`, which keeps a timer alive until
 	// it fires even if the select picked ctx.Done() instead.
@@ -63,24 +62,34 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 				slog.String("workgroup", wgName),
 				slog.String("queryID", queryID))
 			obs.Scope().Timer(DriverName + ".query.canceled").Record(time.Since(loopStart))
-			if c.connector.config.IsMoneyWise() {
-				printCost(c.connector.config.GetRegion(), statusResp)
+			if c.connector.config.MoneyWise {
+				printCost(c.connector.config.RegionOrEnv(), statusResp)
 			}
 			return statusResp.QueryExecution, context.Canceled
 		case athenatypes.QueryExecutionStateFailed:
-			reason := aws.ToString(statusResp.QueryExecution.Status.StateChangeReason)
-			if reason == "" {
-				reason = "query failed with no reason reported"
+			qErr := &QueryFailureError{
+				Message: aws.ToString(statusResp.QueryExecution.Status.StateChangeReason),
+			}
+			if ae := statusResp.QueryExecution.Status.AthenaError; ae != nil {
+				qErr.ErrorCategory = aws.ToInt32(ae.ErrorCategory)
+				qErr.ErrorType = aws.ToInt32(ae.ErrorType)
+				qErr.Retryable = ae.Retryable
+				if qErr.Message == "" {
+					qErr.Message = aws.ToString(ae.ErrorMessage)
+				}
+			}
+			if qErr.Message == "" {
+				qErr.Message = "query failed with no reason reported"
 			}
 			obs.Log(ErrorLevel, "QueryExecutionStateFailed",
 				slog.String("workgroup", wgName),
 				slog.String("queryID", queryID),
-				slog.String("reason", reason))
+				slog.String("reason", qErr.Message))
 			obs.Scope().Timer(DriverName + ".query.queryexecutionstatefailed").Record(time.Since(loopStart))
-			return statusResp.QueryExecution, errors.New(reason)
+			return statusResp.QueryExecution, qErr
 		case athenatypes.QueryExecutionStateSucceeded:
-			if c.connector.config.IsMoneyWise() {
-				printCost(c.connector.config.GetRegion(), statusResp)
+			if c.connector.config.MoneyWise {
+				printCost(c.connector.config.RegionOrEnv(), statusResp)
 			}
 			obs.Scope().Timer(DriverName + ".query.queryexecutionstatesucceeded").Record(time.Since(loopStart))
 			return statusResp.QueryExecution, nil
@@ -98,7 +107,7 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 			}
 			return nil, ctx.Err()
 		case <-timer.C:
-			if isQueryTimeOut(queryStart, statusResp.QueryExecution.StatementType, c.connector.config.GetServiceLimitOverride()) {
+			if isQueryTimeOut(queryStart, statusResp.QueryExecution.StatementType, c.connector.config.ServiceLimit) {
 				obs.Log(ErrorLevel, "Query timeout failure",
 					slog.String("workgroup", wgName),
 					slog.String("queryID", queryID),
@@ -131,11 +140,11 @@ func (c *Connection) stopQueryOnCancel(queryID, wgName, query string, obs *Drive
 		obs.Scope().Counter(DriverName + ".failure.querycontext.stopqueryexecution.failed").Inc(1)
 		return err
 	}
-	if c.connector.config.IsMoneyWise() {
+	if c.connector.config.MoneyWise {
 		statusRespFinal, _ := c.athenaClient.GetQueryExecution(context.Background(), &athena.GetQueryExecutionInput{
 			QueryExecutionId: aws.String(queryID),
 		})
-		printCost(c.connector.config.GetRegion(), statusRespFinal)
+		printCost(c.connector.config.RegionOrEnv(), statusRespFinal)
 	}
 	obs.Scope().Counter(DriverName + ".failure.querycontext.stopqueryexecution.succeeded").Inc(1)
 	obs.Scope().Timer(DriverName + ".query.StopQueryExecution").Record(time.Since(now))

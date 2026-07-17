@@ -42,20 +42,21 @@ const (
 
 	// CatalogKey overrides the Athena data catalog used for a single query.
 	// Value must be a non-empty string. When unset, the driver falls back to
-	// Config.GetCatalog(), which itself defaults to AWS's default catalog.
+	// Config.CatalogOrDefault(), which itself defaults to AWS's default
+	// catalog.
 	CatalogKey = TContextKey("CatalogKey")
 
 	// ResultEncryptionKey overrides the ResultConfiguration.EncryptionConfiguration
 	// sent on StartQueryExecution for a single query. Value must be a
 	// *athenatypes.EncryptionConfiguration. Use WithResultEncryption for a
 	// typed helper. When unset, the driver falls back to
-	// Config.GetResultEncryption().
+	// Config.ResultEncryption.
 	ResultEncryptionKey = TContextKey("ResultEncryptionKey")
 
 	// ExpectedBucketOwnerKey overrides ResultConfiguration.ExpectedBucketOwner
 	// for a single query. Value must be a non-empty string (12-digit AWS
 	// account ID). When unset, the driver falls back to
-	// Config.GetExpectedBucketOwner().
+	// Config.ExpectedBucketOwner.
 	ExpectedBucketOwnerKey = TContextKey("ExpectedBucketOwnerKey")
 
 	// ResultReuseMaxAgeKey opts a single query into Athena's result-reuse
@@ -95,17 +96,35 @@ const (
 	// DMLQueryTimeout is DML query timeout 30 minutes(unit second).
 	DMLQueryTimeout = 30 * 60
 
-	// PoolInterval is the interval between two status checks(unit second).
+	// maxQueryTimeoutSeconds bounds a DSN-supplied DDLQueryTimeout /
+	// DMLQueryTimeout override. Without this bound, a value large enough
+	// (e.g. accidentally supplied in milliseconds) overflows int64 when
+	// isQueryTimeOut converts it to a time.Duration in nanoseconds
+	// (time.Duration(seconds) * time.Second), wrapping negative and making
+	// every query appear instantly timed out. A week is far beyond any
+	// real Athena query's runtime.
+	maxQueryTimeoutSeconds = 7 * 24 * 60 * 60
+
+	// PoolInterval is the initial GetQueryExecution poll interval
+	// (seconds). Subsequent polls back off by PollBackoffMultiplier up
+	// to PollMaxInterval.
 	PoolInterval = 3
+
+	// PollBackoffMultiplier is the default per-poll backoff factor. 1.5
+	// keeps short queries snappy while cutting API calls on long-running
+	// queries by ~5-10x, avoiding contention against Athena's 20 TPS
+	// shared quota.
+	PollBackoffMultiplier = 1.5
+
+	// PollMaxInterval caps the per-poll wait (seconds) when backoff is
+	// enabled. 30s bounds worst-case latency after a completion signal.
+	PollMaxInterval = 30
 
 	// The maximum allowed query string length is 262144 bytes,
 	// where the strings are encoded in UTF-8.
 	// This is not an adjustable quota. (unit bytes)
 	MAXQueryStringLength = 262144
 )
-
-const digits01 = "0123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789"
-const digits10 = "0000000000111111111122222222223333333333444444444455555555556666666666777777777788888888889999999999"
 
 // AthenaColumnTypes is a fixed array of Athena Column Types. An array isn't immutable by nature; you can't make it constant.
 var AthenaColumnTypes = [...]string{"tinyint", "smallint", "integer", "bigint", "float", "real", "double",

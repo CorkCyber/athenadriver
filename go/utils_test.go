@@ -136,11 +136,10 @@ func TestIsQueryTimeOut(t *testing.T) {
 	assert.False(t, isQueryTimeOut(OneHourAgo, athenatypes.StatementTypeDdl, nil))
 	assert.False(t, isQueryTimeOut(OneHourAgo, "UNKNOWN", nil))
 
-	testConf := NewServiceLimitOverride()
-	testConf.SetDMLQueryTimeout(65 * 60) // 65 minutes
+	testConf := &ServiceLimitOverride{DMLQueryTimeout: 65 * 60}
 	assert.False(t, isQueryTimeOut(OneHourAgo, athenatypes.StatementTypeDml, testConf))
 
-	testConf.SetDDLQueryTimeout(30 * 60) // 30 minutes
+	testConf.DDLQueryTimeout = 30 * 60
 	assert.True(t, isQueryTimeOut(OneHourAgo, athenatypes.StatementTypeDdl, testConf))
 	assert.True(t, isQueryTimeOut(OneHourAgo, "UNKNOWN", testConf))
 }

@@ -6,182 +6,107 @@ All notable changes to this driver are documented here. Format roughly follows
 
 ## [Unreleased]
 
-### Added
-- `database/sql` column metadata: `RowsColumnTypeScanType`,
-  `RowsColumnTypeNullable`, `RowsColumnTypePrecisionScale` on `*Rows`.
-- `Connection.ResetSession(ctx)` (implements `driver.SessionResetter`)
-  and `Connection.IsValid()` (implements `driver.Validator`). Lets
-  database/sql discard cancelled / closed connections cleanly instead
-  of handing them back out of the pool.
-- AssumeRoleWithWebIdentity via DSN:
-  `Config.SetWebIdentity(roleARN, tokenFile, sessionName)` (and the
-  DSN keys `webIdentityRoleARN`, `webIdentityTokenFile`,
-  `webIdentityRoleSessionName`). `resolveAWSConfig` builds a
-  `stscreds.WebIdentityRoleProvider` wrapped in `aws.CredentialsCache`
-  when both `roleARN` and `tokenFile` are set.
-- `SQLConnector.WithAWSConfig(awsCfg aws.Config)` and a
-  `NewConnector(cfg)` constructor that lets callers inject a pre-built
-  `aws.Config`. Unlocks IMDS, IRSA / EKS pod identity, SSO, OIDC,
-  custom credential providers, custom retryers, and any other
-  aws-sdk-go-v2 configuration the driver does not surface
-  individually.
-- `Config.SetAWSProfile(name)` (and the equivalent `AWSProfile=` DSN
-  key) now takes effect without requiring `AWS_SDK_LOAD_CONFIG=true`.
-  When a profile is set, the driver invokes
-  `config.LoadDefaultConfig(ctx, config.WithSharedConfigProfile(name))`
-  directly, picking up `~/.aws/config` profiles, SSO sessions, and
-  assume-role chains.
-- `Config.SetResultPollBackoff(multiplier, maxInterval)` adds
-  exponential backoff between `GetQueryExecution` polls. Default is
-  `multiplier=1.0` (no backoff, behavior unchanged).
-- `EncryptionConfiguration` on `ResultConfiguration` (SSE-S3 / SSE-KMS /
-  CSE-KMS for result S3). `Config.SetResultEncryption(option, kmsKey)` /
-  `GetResultEncryption()` for a connection-wide default; per-query
-  override via `WithResultEncryption(ctx, option, kmsKey)` or
-  `ResultEncryptionKey` ctx value.
-- `ExpectedBucketOwner` on `ResultConfiguration` (cross-account safety
-  check). `Config.SetExpectedBucketOwner` / `GetExpectedBucketOwner`;
-  per-query override via `ExpectedBucketOwnerKey` ctx value.
-- `Rows.StatementType()`, `Rows.SubstatementType()`, `Rows.QueryID()`
-  accessors that expose Athena's classification of the query (DML /
-  DDL / SELECT / CREATE_TABLE_AS_SELECT / etc.). Populated from the
-  terminal `GetQueryExecution` response captured by the polling loop.
-- `SQLDriver.Validate(dsn string) error` — DSN sanity check that returns
-  the same parse error `Open` would, suitable for startup-time DSN
-  validation without opening a connection. Also implements
-  `driver.Validator.IsValid()` (always `true`; Athena connections have
-  no persistent server-side state).
-- `Statement.ExecContext` / `Statement.QueryContext` (`driver.StmtExecContext`
-  / `driver.StmtQueryContext`) so prepared-statement execution honors caller
-  context cancellation instead of falling back to `context.Background()`.
-- `ClientRequestToken` on every `StartQueryExecution`. Defaults to a fresh
-  UUIDv4 per query (via `crypto/rand`) so AWS SDK retries are idempotent and
-  a transient network blip does not produce a duplicate, double-charged
-  query. Per-query override via `context.WithValue(ctx,
-  athenadriver.ClientRequestTokenKey, "<token>")`.
-- `ResultReuseConfiguration` (Athena engine v3 result cache) opt-in via
-  `athenadriver.WithResultReuse(ctx, maxAge)` (or `ResultReuseMaxAgeKey`).
-  `maxAge` is clamped to Athena's `[1, 60]` minutes range; queries that
-  hit the cache skip the scan entirely and are not billed.
-- `Catalog` on `QueryExecutionContext`. Defaults to `Config.GetCatalog()`
-  (which defaults to `AwsDataCatalog`); per-query override via
-  `context.WithValue(ctx, athenadriver.CatalogKey, "<catalog>")`. Unlocks
-  Glue alternate catalogs and federated query sources.
-- `Config.SetCatalog` / `Config.GetCatalog` and the `DefaultCatalog`
-  constant (`"AwsDataCatalog"`).
+_Nothing yet. v2.0.0 is the current target; see below._
 
-### Fixed
-- Mock-test `aws/transport/http.ResponseError` literal switched to
-  keyed fields so the package now passes `go vet` and CI lint
-  workflows no longer need `-vet=off`.
-- `buildExecutionParams` now returns a `nil` slice (not an empty slice)
-  when there are no query arguments, so `StartQueryExecution` leaves
-  `ExecutionParameters` unset. Athena rejects non-parameterized queries
-  that carry an empty `ExecutionParameters` array.
-- Server-side query is now stopped when the caller's context is cancelled
-  mid-`GetQueryExecution`. Previously, a context cancellation that landed
-  during the in-flight status poll returned an error without issuing
-  `StopQueryExecution`, leaving the Athena query running (and scanning
-  bytes) until natural completion.
-
-### Changed
-- **Breaking:** logging switched from `go.uber.org/zap` to the
-  standard-library `log/slog`. `LoggerKey` ctx values must now be
-  `*slog.Logger` (previously `*zap.Logger`). `DriverTracer.Logger()` /
-  `SetLogger` / `NewObservability` signatures changed accordingly.
-  The exported `DebugLevel` / `InfoLevel` / `WarnLevel` / `ErrorLevel`
-  constants are still re-exported from the driver package; they now
-  alias `slog.Level` values, so call sites that did
-  `obs.Log(drv.ErrorLevel, "...")` keep working. Field constructors
-  in user code change from `zap.String(...)` to `slog.String(...)`
-  (and friends).
-- Driver no longer pulls `go.uber.org/zap` (or `zapcore`,
-  `go.uber.org/multierr`) into consumers' module graph. The only
-  remaining uber transitive is `go.uber.org/atomic`, required by
-  `uber-go/tally/v4`.
-- CI: replaced the stale `.travis.yml` (Go 1.12–1.16, `uber/athenadriver`
-  paths, archived `golang.org/x/lint/golint`) with
-  `.github/workflows/ci.yml`. The workflow runs `go vet`, `gofmt -s`,
-  and `go test -race` across Go 1.22, 1.23, 1.24, uploads coverage to
-  Codecov, and builds the `athenareader/` CLI as a separate job.
-  `Makefile` simplified to match.
-- README: added an "About this fork" section explaining the fork
-  chain (uber → grafana → CorkCyber), why this Cork Cyber fork picks
-  up from grafana's aws-sdk-go-v2 port, and what new surface area
-  this repo adds (Athena API features since 2022, log/slog, OTel
-  direction, aws.Config injection, hardened polling). Badge URLs and
-  the "made by" badge swapped to Cork Cyber; FOSSA badge (pointing
-  at uber's project ID) removed.
-- `athenareader/` is now a separate Go module
-  (`github.com/CorkCyber/athenadriver/athenareader`) with its own
-  `go.mod`. `lib/configfx` + `lib/queryfx` moved under
-  `athenareader/lib/` since they were only used by the CLI. Library
-  consumers that import just the driver
-  (`github.com/CorkCyber/athenadriver/go`) no longer transitively pull
-  `go.uber.org/fx`, `go.uber.org/config`, `go.uber.org/dig`, BurntSushi
-  TOML, `golang.org/x/lint`, or `golang.org/x/tools` into their
-  module graph. The CLI's `go.mod` uses a `replace` directive against
-  `../` for in-repo development; release builds should override that.
-- `(*Rows).fetchNextPage` now uses
-  `athena.NewGetQueryResultsPaginator` (aws-sdk-go-v2) instead of the
-  hand-rolled `NextToken` loop. Behavior unchanged; pagination state lives
-  on the paginator rather than `ResultOutput.NextToken`.
-- Replaced the vendored `aws-sdk-go` v1 `awsutil.Prettify` (`go/prettify.go`)
-  with a small, purpose-built formatter that handles
-  `athena/types.WorkGroupConfiguration` (and its nested `ResultConfiguration`,
-  `EncryptionConfiguration`, `EngineVersion`) directly. No external dependency
-  on dead-upstream code; output of `Config.Stringify()` is unchanged for the
-  fields exercised by existing tests.
-- `go.mod` directive relaxed from `go 1.26.3` (Grafana plugin CI hygiene
-  default) to `go 1.22` so general consumers on supported Go toolchains can
-  build the driver.
-- `examples/metrics.go` migrated from `cactus/go-statsd-client/statsd` v1 to
-  `cactus/go-statsd-client/v5` (matches what `uber-go/tally/v4` already
-  requires for its statsd reporter).
-
-### Removed
-- Self-import of `github.com/uber/athenadriver` from `go.mod`. All in-repo
-  imports rewritten to `github.com/CorkCyber/athenadriver`.
-- Indirect dependencies dropped by `go mod tidy` after the import rewrite:
-  `aws-sdk-go` v1, `jmespath`, `uber-go/tally` v3.
-
-## [2.0.0] — aws-sdk-go-v2 migration (`CorkCyber/athenadriver`)
+## [2.0.0] — aws-sdk-go-v2 + typed Config (`CorkCyber/athenadriver`)
 
 First release under `github.com/CorkCyber/athenadriver`. Fork chain:
-[`uber/athenadriver`](https://github.com/uber/athenadriver) (dormant
-since 2025-05-31) →
-[`grafana/athenadriver`](https://github.com/grafana/athenadriver)
-(carried the v1 → v2 AWS SDK port to
-[`aws-sdk-go-v2`](https://github.com/aws/aws-sdk-go-v2)) →
-this repo, which picks up from Grafana and adds the surface area
-covered by this CHANGELOG.
+[uber](https://github.com/uber/athenadriver) (dormant since 2025-05-31) →
+[grafana](https://github.com/grafana/athenadriver) (carried the v1 → v2
+AWS SDK port) → this repo.
 
-### Migration notes for consumers coming from `uber/athenadriver`
+### Breaking
 
-1. **Import path** changes from `github.com/uber/athenadriver` to
-   `github.com/CorkCyber/athenadriver`. Update all imports in your code and
-   `go.mod`.
-2. Driver registration name is unchanged (`drv.DriverName`), so existing
-   `sql.Open("awsathena", dsn)` calls keep working.
-3. AWS SDK types exposed by the driver (e.g. workgroup configuration,
-   result configuration, encryption configuration) now come from
-   `github.com/aws/aws-sdk-go-v2/service/athena/types` instead of
-   `github.com/aws/aws-sdk-go/service/athena`. Any code that constructs these
-   types directly must be updated to the v2 type names and pointer
-   conventions.
-4. Credential plumbing: the v1 `*credentials.Credentials` chain is replaced
-   by `aws.Config` / `aws.CredentialsProvider`. DSN keys (`accessID`,
-   `secretAccessKey`, `sessionToken`, `region`) are unchanged.
-5. Minimum Go version: `1.22`.
+Full migration steps live in the [README v2 migration guide](README.md#v200-migration-guide).
 
-### Included upstream fixes (carried forward from `uber/athenadriver`)
+1. **Module path** — `uber/athenadriver` → `CorkCyber/athenadriver`. `drv.DriverName` unchanged.
+2. **AWS SDK v1 → v2** — types move to `aws-sdk-go-v2/service/athena/types`; credentials flow through `aws.Config`. DSN keys unchanged.
+3. **`Config` is a typed struct** — assign fields directly. Validating setters kept: `SetOutputBucket`, `SetRegion`, `SetAccessID`, `SetSecretAccessKey`, `SetWorkGroup`.
+4. **Logger** — `*zap.Logger` → `*slog.Logger`. Silent runtime break for callers that inject via `LoggerKey` ctx.
+5. **Go floor** — 1.13 → 1.22.
+6. **`athenareader/` is a separate module** — `github.com/CorkCyber/athenadriver/athenareader`.
+7. **`ServiceLimitOverride` is a typed struct** — assign `DDLQueryTimeout` / `DMLQueryTimeout` fields. Setters + `ErrServiceLimitOverride` removed.
+8. **Constructors collapsed** — `NewDefaultObservability`, `NewNoOpsObservability`, `NewWGConfig`, `NewNonOpsRows` removed. Use `NewObservability(cfg, nil, nil)` and struct literals.
+9. **Poll defaults** — backoff `1.5×` (was `1.0`), cap `30s` (was equal to initial interval). New constants: `PollBackoffMultiplier`, `PollMaxInterval`. Opt out via `Config.ResultPollBackoffMultiplier` and `Config.ResultPollMaxInterval`.
 
-- Pass underlying AWS error when getting workgroup (PR #64, #68, #70).
+### Added
+
+**Credentials & connectivity**
+- `SQLConnector.WithAWSConfig(aws.Config)` + `NewConnector(cfg)` — inject pre-built `aws.Config`. Unlocks IMDS, IRSA, SSO, OIDC, custom retryers.
+- `Config.AWSProfile` (DSN: `AWSProfile=`) works without `AWS_SDK_LOAD_CONFIG=true`.
+- AssumeRoleWithWebIdentity via `Config.WebIdentityRoleARN` / `WebIdentityTokenFile` / `WebIdentityRoleSessionName` (or equivalent DSN keys).
+
+**Query execution**
+- `Statement.ExecContext` / `QueryContext` (`driver.Stmt*Context`) — prepared statements honor caller context.
+- `Connection.ResetSession` / `IsValid` — `database/sql` discards cancelled/closed conns cleanly.
+- `ClientRequestToken` on every `StartQueryExecution`; default fresh UUIDv4 (idempotent SDK retries). Override via `ClientRequestTokenKey` ctx.
+- Statement-aware parameter routing: `?` placeholders go to Athena as `ExecutionParameters` for SELECT / INSERT / CTAS / UNLOAD / WITH; parameterized DDL (ALTER, MSCK, plain CREATE, ...) is interpolated client-side — Athena rejects `ExecutionParameters` on DDL.
+- `QueryFailureError` — FAILED queries surface Athena's structured `AthenaError` (`ErrorCategory` / `ErrorType` / `Retryable`) via `errors.As`, so callers can tell retryable system errors from user SQL errors.
+- `Catalog` on `QueryExecutionContext`. `Config.Catalog` + `CatalogOrDefault()` + `DefaultCatalog` constant. Per-query override via `CatalogKey` ctx.
+- `ResultReuseConfiguration` opt-in via `WithResultReuse(ctx, maxAge)` (`ResultReuseMaxAgeKey`); clamped to `[1, 60]` min.
+
+**Results & security**
+- `Rows.StatementType()`, `Rows.SubstatementType()`, `Rows.QueryID()`.
+- `RowsColumnTypeScanType`, `RowsColumnTypeNullable`, `RowsColumnTypePrecisionScale`.
+- `Config.ResultEncryption` (SSE-S3 / SSE-KMS / CSE-KMS). Per-query override via `WithResultEncryption` or `ResultEncryptionKey` ctx.
+- `Config.ExpectedBucketOwner` (cross-account safety). Per-query override via `ExpectedBucketOwnerKey` ctx.
+- `SQLDriver.Validate(dsn)` — startup-time DSN check; also implements `driver.Validator.IsValid()`.
+
+**Poll tuning**
+- `Config.ResultPollBackoffMultiplier` / `Config.ResultPollMaxInterval`.
+
+### Fixed
+
+**Correctness / contract**
+- `Statement.Close` idempotent; `Exec` / `Query` / `*Context` no longer auto-close so `stmt.Query(a); stmt.Query(b)` works.
+- `SQLConnector.Connect` no longer mutates a shared tracer field — was a data race across goroutines that swapped logger/scope on live Connections. Each Connection now owns its tracer.
+- `NewConnector` copies the Config at construction — mutating the caller's `*Config` after `sql.OpenDB` no longer races with (or retroactively changes) pooled connections.
+- Boolean query args emit Trino literals `true` / `false` (were MySQL-style `1` / `0`, which fail Athena BOOLEAN type-checks).
+- Poll loop no longer panics on `FAILED` state with nil `StateChangeReason`; surfaces generic error.
+- `buildExecutionParams` returns `nil` (not empty slice) so `StartQueryExecution` omits `ExecutionParameters` for non-parameterized queries.
+- Server-side query stopped when caller ctx is cancelled mid-`GetQueryExecution` (was leaking billed scan).
+
+**Scanning**
+- Athena `TIMESTAMP` values without fractional seconds now scan (`"2006-01-02 15:04:05"` layout was missing) — and parse on the first attempt via shape-dispatched layout selection instead of failing through up to five layouts per cell (~9x faster on the common shape; matters on million-row scans).
+
+**DSN round-trip**
+- `Config.WGRemoteCreation = false` survives round-trip.
+- Custom `WorkGroupConfiguration` on a Workgroup survives round-trip (pre-v2 path silently swapped in `GetDefaultWGConfig()`).
+- Invalid integers in DSN keys (`resultPollIntervalSeconds`, `resultPollMaxIntervalSeconds`, `resultPollBackoffMultiplier`, `DDLQueryTimeout`, `DMLQueryTimeout`) error at `NewConfig` instead of silently defaulting.
+- Explicit `ResultPollBackoffMultiplier = 1.0` ("disable backoff") survives the round-trip instead of silently reverting to the 1.5 default.
+- `missingAsEmptyString` and `MetricsEnabled` default to **true** when absent from the DSN, matching `NewNoOpsConfig` and the pre-v2 defaults (metrics stay wired to `NoopScope` until a `Scope` is injected via `MetricsKey`).
+- Bucket host with whitespace / non-DNS-safe characters, and single-slash or multi-slash DSNs (`s3:/foo`, `s3://host//path`), now error at `NewConfig`; previously parsed but failed on Stringify → re-parse (found via `FuzzNewConfig`).
+
+**Query validation**
+- Query length gates on placeholder-form (what Athena receives against the 262 KiB cap), not on the interpolated string.
+
+**Tooling**
+- Mock `aws/transport/http.ResponseError` literal keyed; `go vet` clean, CI drops `-vet=off`.
+
+### Changed
+
+Internal only. See "Breaking" above for user-visible v1 → v2 changes.
+
+- Driver no longer pulls `go.uber.org/zap`, `zapcore`, or `go.uber.org/multierr`. Only remaining uber transitive: `go.uber.org/atomic` (required by `tally/v4`).
+- `(*Rows).fetchNextPage` uses `athena.NewGetQueryResultsPaginator`; hand-rolled `NextToken` loop gone.
+- Vendored `aws-sdk-go` v1 `awsutil.Prettify` replaced with a purpose-built formatter for `athena/types.WorkGroupConfiguration` and its nested types.
+- CI replaced `.travis.yml` with `.github/workflows/ci.yml`: `go vet`, `gofmt -s`, `go test -race` across Go 1.22 / 1.23 / 1.24, Codecov, athenareader CLI build.
+- `go.mod` `go` directive relaxed from `1.26.3` (Grafana plugin default) to `1.22`.
+- `examples/metrics.go` moved to `cactus/go-statsd-client/v5` (matches `tally/v4` statsd reporter).
+- README: "About this fork" section, badges refreshed, FOSSA badge dropped.
+
+### Removed
+
+- Self-import of `github.com/uber/athenadriver` from `go.mod`.
+- Indirect deps dropped after import rewrite: `aws-sdk-go` v1, `jmespath`, `uber-go/tally` v3.
+
+### Upstream fixes carried forward (`uber/athenadriver`)
+
+- Underlying AWS error passed through workgroup fetch (PRs #64, #68, #70).
 - Nil-pointer fix on workgroup tags (PR #69).
-- Leave `ExecutionParameters` nil if no args, fixing queries that pre-date
-  Athena's parameterized-query support (PR #74).
-- Tally `v3` → `v4` upgrade (PR #76).
-- README documentation for Athena parameterized queries.
+- `ExecutionParameters` nil when no args (PR #74).
+- `tally` v3 → v4 (PR #76).
+- Parameterized-query README docs.
 
 [Unreleased]: https://github.com/CorkCyber/athenadriver/compare/v2.0.0...HEAD
 [2.0.0]: https://github.com/CorkCyber/athenadriver/releases/tag/v2.0.0

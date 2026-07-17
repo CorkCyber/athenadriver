@@ -198,11 +198,11 @@ func new(p Params) (Result, error) {
 		mc.OutputConfig.Render = *format
 	}
 	if mc.OutputConfig.Moneywise {
-		mc.DrvConfig.SetMoneyWise(true)
+		mc.DrvConfig.MoneyWise = true
 	}
-	mc.DrvConfig.SetDB(mc.InputConfig.Database)
+	mc.DrvConfig.DB = mc.InputConfig.Database
 	if !mc.InputConfig.Admin {
-		mc.DrvConfig.SetReadOnly(true)
+		mc.DrvConfig.ReadOnly = true
 	}
 	if err != nil {
 		return Result{}, err

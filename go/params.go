@@ -5,6 +5,7 @@ package athenadriver
 import (
 	"database/sql/driver"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -36,13 +37,19 @@ func (c *Connection) buildExecutionParams(args []driver.Value) ([]string, error)
 		case uint64:
 			val = strconv.FormatUint(v, 10)
 		case float64:
+			// strconv.FormatFloat renders NaN/Inf as the bare words
+			// NaN/+Inf/-Inf, which aren't valid Trino/Athena numeric-literal
+			// syntax: emitting them would send malformed SQL and surface as
+			// an opaque server-side parse error instead of this clear
+			// client-side one.
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return []string{}, fmt.Errorf("athenadriver: float argument %v has no Athena SQL literal representation", v)
+			}
 			val = strconv.FormatFloat(v, 'g', -1, 64)
 		case bool:
-			if v {
-				val = "1"
-			} else {
-				val = "0"
-			}
+			// Trino/Athena boolean literals; "1"/"0" (the MySQL-driver
+			// heritage) fails BOOLEAN type-checks server-side.
+			val = strconv.FormatBool(v)
 		case time.Time:
 			// Note: time.Time objects are transformed into strings for a STRING/CHAR/VARCHAR type column.
 			// To maintain compatibility with the current interpolateParams() behavior, this function produces a string
@@ -87,8 +94,10 @@ func (c *Connection) interpolateParams(query string, args []driver.Value) (strin
 		return "", ErrInvalidQuery
 	}
 
-	queryBuffer := make([]byte, MAXQueryStringLength)
-	queryBuffer = queryBuffer[:0]
+	// Grow-as-needed buffer sized to the query plus a 64-byte cushion per
+	// argument. Previous fixed 256 KiB pre-alloc was garbage on every
+	// parameterized query, regardless of query length.
+	queryBuffer := make([]byte, 0, len(query)+64*len(args))
 	argPos := 0
 
 	for i := 0; i < len(query); i++ {
@@ -114,57 +123,22 @@ func (c *Connection) interpolateParams(query string, args []driver.Value) (strin
 		case uint64:
 			queryBuffer = strconv.AppendUint(queryBuffer, v, 10)
 		case float64:
+			if math.IsNaN(v) || math.IsInf(v, 0) {
+				return "", fmt.Errorf("athenadriver: float argument %v has no Athena SQL literal representation", v)
+			}
 			queryBuffer = strconv.AppendFloat(queryBuffer, v, 'g', -1, 64)
 		case bool:
-			if v {
-				queryBuffer = append(queryBuffer, '1')
-			} else {
-				queryBuffer = append(queryBuffer, '0')
-			}
+			queryBuffer = strconv.AppendBool(queryBuffer, v)
 		case time.Time:
 			if v.IsZero() {
 				queryBuffer = append(queryBuffer, "'0000-00-00'"...)
 			} else {
-				v := v.In(time.UTC)
-				v = v.Add(time.Nanosecond * 500) // To round under microsecond
-				year := v.Year()
-				year100 := year / 100
-				year1 := year % 100
-				month := v.Month()
-				day := v.Day()
-				hour := v.Hour()
-				minute := v.Minute()
-				second := v.Second()
-				micro := v.Nanosecond() / 1000
-
-				queryBuffer = append(queryBuffer, []byte{
-					'\'',
-					digits10[year100], digits01[year100],
-					digits10[year1], digits01[year1],
-					'-',
-					digits10[month], digits01[month],
-					'-',
-					digits10[day], digits01[day],
-					' ',
-					digits10[hour], digits01[hour],
-					':',
-					digits10[minute], digits01[minute],
-					':',
-					digits10[second], digits01[second],
-				}...)
-
-				if micro != 0 {
-					micro10000 := micro / 10000
-					micro100 := micro / 100 % 100
-					micro1 := micro % 100
-					queryBuffer = append(queryBuffer, []byte{
-						'.',
-						digits10[micro10000], digits01[micro10000],
-						digits10[micro100], digits01[micro100],
-						digits10[micro1], digits01[micro1],
-					}...)
+				v := v.In(time.UTC).Add(time.Nanosecond * 500)
+				layout := "'2006-01-02 15:04:05'"
+				if v.Nanosecond()/1000 != 0 {
+					layout = "'2006-01-02 15:04:05.000000'"
 				}
-				queryBuffer = append(queryBuffer, '\'')
+				queryBuffer = v.AppendFormat(queryBuffer, layout)
 			}
 		case []byte:
 			queryBuffer = append(queryBuffer, "_binary'"...)

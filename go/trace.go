@@ -45,22 +45,10 @@ func NewObservability(config *Config, logger *slog.Logger, scope tally.Scope) *D
 	return &DriverTracer{logger: logger, scope: scope, config: config}
 }
 
-// NewDefaultObservability returns a tracer that discards logs and uses the
-// tally noop scope. Used when no observability values are supplied via
-// context or constructor.
-func NewDefaultObservability(config *Config) *DriverTracer {
-	return &DriverTracer{logger: discardLogger, scope: tally.NoopScope, config: config}
-}
-
-// NewNoOpsObservability is for testing purpose.
-func NewNoOpsObservability() *DriverTracer {
-	return &DriverTracer{logger: discardLogger, scope: tally.NoopScope, config: NewNoOpsConfig()}
-}
-
 // Logger returns the slog logger, or a discard logger if logging is
 // disabled in Config.
 func (c *DriverTracer) Logger() *slog.Logger {
-	if !c.config.IsLoggingEnabled() {
+	if !c.config.LoggingEnabled {
 		return discardLogger
 	}
 	return c.logger
@@ -76,7 +64,7 @@ func (c *DriverTracer) SetLogger(logger *slog.Logger) {
 
 // Scope returns the tally scope, or noop if metrics are disabled in Config.
 func (c *DriverTracer) Scope() tally.Scope {
-	if !c.config.IsMetricsEnabled() {
+	if !c.config.MetricsEnabled {
 		return tally.NoopScope
 	}
 	return c.scope
@@ -91,7 +79,7 @@ func (c *DriverTracer) SetScope(scope tally.Scope) {
 // levels intentionally have no analogue; the driver never wants a DB error
 // to terminate the host process.
 func (c *DriverTracer) Log(lvl slog.Level, msg string, attrs ...slog.Attr) {
-	if !c.config.IsLoggingEnabled() {
+	if !c.config.LoggingEnabled {
 		return
 	}
 	c.logger.LogAttrs(context.Background(), lvl, msg, attrs...)

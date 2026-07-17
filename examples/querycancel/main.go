@@ -23,7 +23,7 @@ func main() {
 	}
 
 	// 2. Open Connection.
-	conf.SetMoneyWise(true)
+	conf.MoneyWise = true
 	dsn := conf.Stringify()
 	db, _ := sql.Open(drv.DriverName, dsn)
 	// 3. Query cancellation after 2 seconds

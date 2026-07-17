@@ -71,6 +71,129 @@ advanced features like Athena workgroup and tagging creation, driver read-only m
 
 The PDF version of AthenaDriver document is available at [ :scroll: ](resources/athenadriver.pdf)
 
+## v2.0.0 Migration Guide
+
+Nine breaking changes, batched into one release.
+
+### Summary
+
+| # | Change | Migration |
+|---|--------|-----------|
+| 1 | Module path `uber/athenadriver` → `CorkCyber/athenadriver` | Rewrite imports. `sql.Open("awsathena", dsn)` unchanged. |
+| 2 | `aws-sdk-go` → `aws-sdk-go-v2` | Update AWS type imports + pointer helpers. |
+| 3 | `Config` is a typed struct | Assign fields; a few validating setters remain. |
+| 4 | Logger: `*zap.Logger` → `*slog.Logger` | Inject `*slog.Logger` via `LoggerKey` ctx. |
+| 5 | Go floor: 1.13 → 1.22 | Bump toolchain. |
+| 6 | `athenareader/` is a separate module | Update its import path if you used it as a library. |
+| 7 | `ServiceLimitOverride` is a typed struct | Assign fields. |
+| 8 | Observability + WG helper constructors collapsed | One constructor / struct literal. |
+| 9 | Poll defaults changed (exponential backoff, 30s cap) | Opt out with two field assignments. |
+
+### 1. Module path
+
+```
+github.com/uber/athenadriver       (v1)
+github.com/grafana/athenadriver    (v2 port, transitional)
+github.com/CorkCyber/athenadriver  (v2.0.0)
+```
+
+### 2. AWS SDK v1 → v2
+
+- AWS types come from `github.com/aws/aws-sdk-go-v2/service/athena/types`.
+- Credentials flow through `aws.Config` / `aws.CredentialsProvider`.
+- DSN keys (`accessID`, `secretAccessKey`, `sessionToken`, `region`) unchanged.
+- Escape hatch for IMDS / IRSA / SSO / OIDC / assume-role / custom retryers: `SQLConnector.WithAWSConfig(aws.Config)`.
+
+### 3. `Config` is a typed struct
+
+Field access replaces setter/getter methods. DSN format unchanged; `Stringify()` and `NewConfig(dsn)` round-trip every field.
+
+```go
+conf := drv.NewNoOpsConfig()
+_ = conf.SetOutputBucket("s3://...")  // validating setter, kept
+_ = conf.SetRegion("us-east-1")       // validating setter, kept
+conf.DB        = "sampledb"
+conf.MoneyWise = true
+conf.Catalog   = "myCatalog"
+```
+
+Validating setters kept: `SetOutputBucket`, `SetRegion`, `SetAccessID`, `SetSecretAccessKey`, `SetWorkGroup`.
+
+| pre-v2 | v2.0.0 |
+|--------|--------|
+| `cfg.SetDB("foo")` / `cfg.GetDB()` | `cfg.DB = "foo"` / `cfg.DB` |
+| `cfg.SetMoneyWise(true)` / `cfg.IsMoneyWise()` | `cfg.MoneyWise = true` / `cfg.MoneyWise` |
+| `cfg.GetRegion()` (env fallback) | `cfg.RegionOrEnv()` |
+| `cfg.GetCatalog()` (default) | `cfg.CatalogOrDefault()` |
+| `cfg.GetResultPollIntervalSeconds()` | `cfg.PollInterval()` |
+| `cfg.SetResultPollIntervalSeconds(n)` | `cfg.ResultPollInterval = time.Duration(n) * time.Second` |
+| `cfg.SetServiceLimitOverride(svc)` | `cfg.ServiceLimit = &svc` |
+| `cfg.GetWorkgroup()` | `*cfg.WorkGroup` |
+
+Same pattern applies to every other `Set*/Get*/Is*` pair on `Config`.
+
+### 4. Logger: zap → log/slog
+
+**Silent runtime break.** Old code compiles but the driver's type assertion fails and logs vanish.
+
+```go
+// v2.0.0
+ctx = context.WithValue(ctx, drv.LoggerKey, slog.New(handler))
+```
+
+`DebugLevel` / `InfoLevel` / `WarnLevel` / `ErrorLevel` now alias `slog.Level`. `obs.Log(drv.ErrorLevel, "...")` call sites keep working.
+
+### 5. Go 1.22 floor
+
+Uses `log/slog`, `reflect.TypeFor[T]()`, and `range` over integers.
+
+### 6. `athenareader/` is a separate module
+
+Import path for library consumers:
+
+```
+github.com/uber/athenadriver/athenareader          (v1)
+github.com/CorkCyber/athenadriver/athenareader     (v2.0.0)
+```
+
+Isolating the module drops `go.uber.org/fx`, `go.uber.org/config`, `go.uber.org/dig`, BurntSushi TOML, and `golang.org/x/{lint,tools}` from driver-only consumers.
+
+### 7. `ServiceLimitOverride` is a typed struct
+
+```go
+// pre-v2
+svc := drv.NewServiceLimitOverride()
+_ = svc.SetDDLQueryTimeout(3600)
+_ = svc.SetDMLQueryTimeout(1800)
+
+// v2.0.0
+svc := &drv.ServiceLimitOverride{DDLQueryTimeout: 3600, DMLQueryTimeout: 1800}
+```
+
+Removed: `NewServiceLimitOverride`, `SetDDL/DMLQueryTimeout`, `GetDDL/DMLQueryTimeout`, `GetAsStringMap`, `SetFromValues`, `ErrServiceLimitOverride`.
+
+### 8. Constructors collapsed
+
+| Removed | Replacement |
+|---------|-------------|
+| `NewDefaultObservability(cfg)` | `NewObservability(cfg, nil, nil)` |
+| `NewNoOpsObservability()` | `NewObservability(NewNoOpsConfig(), nil, nil)` |
+| `NewWGConfig(...)` | `&athenatypes.WorkGroupConfiguration{...}` |
+| `NewNonOpsRows(...)` | *(was internal, no replacement needed)* |
+
+### 9. Poll defaults changed
+
+`GetQueryExecution` polling now backs off by `1.5×` up to `30s`. Long queries hit the Athena API ~5–10× less; short-query latency unchanged.
+
+Old flat-`3s` cadence:
+
+```go
+cfg.ResultPollBackoffMultiplier = 1.0
+cfg.ResultPollMaxInterval       = 3 * time.Second
+```
+
+New constants: `PollBackoffMultiplier` (1.5), `PollMaxInterval` (30s). `PoolInterval` (3s initial) unchanged.
+
 ## Features
 
 Except the basic features provided by Go `database/sql` like error handling, database pool and reconnection, `athenadriver` supports the following features out of box:
@@ -387,7 +510,7 @@ we can see `athenadriver` can handle all these advanced types correctly.
  
 If you want to disable programmatically creating workgroup and tags, you need to explicitly call:
 ```go
-Config.SetWGRemoteCreationAllowed(false)
+Config.WGRemoteCreation = false
 ```
 In this case, you need to make sure the workgroup you specifies must exist, or you will get error. An example is like
  below:
@@ -414,7 +537,7 @@ func main() {
 	conf.SetWorkGroup(wg)
 	// comment out the line below to allow remote workgroup creation and
 	// the query will be successful!!!
-	conf.SetWGRemoteCreationAllowed(false)
+	conf.WGRemoteCreation = false
 	// 2. Open Connection.
 	dsn := conf.Stringify()
 	db, _ := sql.Open(drv.DriverName, dsn)
@@ -443,7 +566,7 @@ But I don't have a workgroup named `henry_wu` in AWS Athena, so I got sample out
 ```
 
 
-After commenting out `conf.SetWGRemoteCreationAllowed(false)` at line 27, the output becomes:
+After commenting out the `conf.WGRemoteCreation = false` line above, the output becomes:
 
 ```go
 https://www.example.com/articles/553
@@ -736,10 +859,8 @@ func main() {
 	conf, _ := drv.NewDefaultConfig("s3://myqueryresults/",
 		"us-east-2", "DummyAccessID", "DummySecretAccessKey")
 	
-	// 2. Override the DML query timeout to 60 minutes (3600 seconds). 
-	serviceLimitOverride := drv.NewServiceLimitOverride()
-	serviceLimitOverride.SetDMLQueryTimeout(3600)
-	conf.SetServiceLimitOverride(*serviceLimitOverride)
+	// 2. Override the DML query timeout to 60 minutes (3600 seconds).
+	conf.ServiceLimit = &drv.ServiceLimitOverride{DMLQueryTimeout: 3600}
 
 	// 3. Open Connection.
 	dsn := conf.Stringify()
@@ -789,20 +910,20 @@ Athena type:
 | `date`, `time`, `time with time zone`, `timestamp`, `timestamp with time zone` | `time.Time{}` |
 | `json`, `char`, `varchar`, `varbinary`, `row`, `string`, `binary`, `struct`, `interval year to month`, `interval day to second`, `decimal`, `ipaddress`, `array`, `map`, `unknown` | `""` |
 
-By default, the driver uses empty string to replace missing values and empty string is preferred to default data, or `nil`. To use
-`default data`, you have to explicitly call:
+By default, the driver uses empty string to replace missing values. When more than one of the three flags below is set, `nil` wins
+over `empty string`, which wins over `default data`. To use `default data`, you have to explicitly call:
 
 ```go
-Config.SetMissingAsEmptyString(false)
-Config.SetMissingAsDefault(true)
+Config.MissingAsEmptyString = false
+Config.MissingAsDefault = true
 ```
 
 If you need to use `nil` as missing value, you can call:
 
 ```go
-Config.SetMissingAsEmptyString(false)
-Config.SetMissingAsDefault(false)
-Config.SetMissingAsNil(true)
+Config.MissingAsEmptyString = false
+Config.MissingAsDefault = false
+Config.MissingAsNil = true
 ```
 
 But if you are strict with your data integrity and want an error raised when data are missing, you can set all three of them to `false`.
@@ -815,7 +936,7 @@ Any writing and modification to the database will raise an error. This is useful
 is disabled. To enable it, you need to explicitly call:
 
 ```go
-Config.SetReadOnly(true)
+Config.ReadOnly = true
 ```
 
 The following is one example. It enables read-only mode in line 19, but tries to create a new table with CTAS statement.
@@ -835,7 +956,7 @@ func main() {
 	// 1. Set AWS Credential in Driver Config.
 	conf, _ := drv.NewDefaultConfig("s3://myqueryresults/",
 		"us-east-2", "DummyAccessID", "DummySecretAccessKey")
-	conf.SetReadOnly(true)
+	conf.ReadOnly = true
 
 	// 2. Open Connection.
 	dsn := conf.Stringify()
@@ -882,7 +1003,7 @@ func main() {
 	// 1. Set AWS Credential in Driver Config.
 	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
 	conf, err := drv.NewDefaultConfig(secret.OutputBucket, secret.Region, secret.AccessID, secret.SecretAccessKey)
-	conf.SetLogging(true)
+	conf.LoggingEnabled = true
 	if err != nil {
 		panic(err)
 		return
@@ -987,7 +1108,7 @@ need per-query logger swapping, use separate `*sql.DB` instances.
 | --- | --- |
 | Default (no logs at all) | Do nothing. The driver wires `slog.New(slog.NewTextHandler(io.Discard, nil))` automatically. |
 | Pass a no-op handler explicitly | `slog.New(slog.DiscardHandler)` (Go 1.24+) or `slog.New(slog.NewTextHandler(io.Discard, nil))`. |
-| Hard kill-switch | `conf.SetLogging(false)`. Short-circuits inside `DriverTracer.Log` before attrs are formatted; `DriverTracer.Logger()` returns the discard logger regardless of any context-supplied logger. |
+| Hard kill-switch | `conf.LoggingEnabled = false`. Short-circuits inside `DriverTracer.Log` before attrs are formatted; `DriverTracer.Logger()` returns the discard logger regardless of any context-supplied logger. |
 
 Sample output (with an `slog.NewJSONHandler` and Info-level threshold):
 
@@ -1001,7 +1122,7 @@ Sample output (with an `slog.NewJSONHandler` and Info-level threshold):
  no-op Scope. You need to pass a workable scope to make it work. If you don't want metrics at all, you need to explicitly  call:
 
 ```go
-  Config.SetMetrics(false)
+  Config.MetricsEnabled = false
 ```
 
 The following example is to pass in a scope with `statsd` reporter.

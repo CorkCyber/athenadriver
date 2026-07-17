@@ -3,10 +3,12 @@
 package athenadriver
 
 import (
-	"github.com/stretchr/testify/assert"
-	"net/url"
 	"testing"
 	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestAthenaConfig(t *testing.T) {
@@ -21,21 +23,21 @@ func TestAthenaConfig(t *testing.T) {
 	assert.Nil(t, err)
 	err = testConf.SetRegion("us-east-1")
 	assert.Nil(t, err)
-	testConf.SetUser("henry.wu@uber.com")
-	testConf.SetDB("default") // default
+	testConf.User = "henry.wu@uber.com"
+	testConf.DB = "default" // default
 
 	err = testConf.SetWorkGroup(wg)
 	assert.Nil(t, err)
-	assert.Equal(t, "henry.wu@uber.com", testConf.GetUser())
-	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/", testConf.GetOutputBucket())
-	expected := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&db=default&missingAsEmptyString=true&region=us-east-1&tag=%7CUber+User%60henry.wu%40uber.com%7CUber+Asset%60abc.efg&workgroupName=henry_wu"
+	assert.Equal(t, "henry.wu@uber.com", testConf.User)
+	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/", testConf.OutputBucket())
+	expected := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&db=default&region=us-east-1&tag=%7CUber+User%60henry.wu%40uber.com%7CUber+Asset%60abc.efg&workgroupName=henry_wu"
 	actual := testConf.Stringify()
 	assert.Equal(t, actual, expected)
-	w := testConf.GetWorkgroup()
+	w := *testConf.WorkGroup
 	assert.Equal(t, len(w.Tags.Get()), len(wgTags.Get()))
 
 	x, err := NewConfig(expected)
-	assert.Equal(t, x.GetOutputBucket(), s3bucket)
+	assert.Equal(t, x.OutputBucket(), s3bucket)
 	assert.Nil(t, err)
 }
 
@@ -45,8 +47,8 @@ func TestGetOutputBucket(t *testing.T) {
 	err := testConf.SetOutputBucket(s3bucket)
 	conf, _ := NewConfig(testConf.Stringify())
 	assert.Nil(t, err)
-	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/local/", testConf.GetOutputBucket())
-	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/local/", conf.GetOutputBucket())
+	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/local/", testConf.OutputBucket())
+	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/local/", conf.OutputBucket())
 }
 
 func TestAthenaConfigWrongS3Bucket(t *testing.T) {
@@ -88,26 +90,26 @@ func TestAthenaConfigSafeString(t *testing.T) {
 	assert.Nil(t, err)
 	err = testConf.SetRegion("us-east-1")
 	assert.Nil(t, err)
-	testConf.SetUser("henry.wu@uber.com")
-	testConf.SetDB("default") // default
+	testConf.User = "henry.wu@uber.com"
+	testConf.DB = "default" // default
 	err = testConf.SetWorkGroup(wg)
 	assert.Nil(t, err)
 	err = testConf.SetSecretAccessKey("thisisaKey")
 	assert.Nil(t, err)
 	err = testConf.SetAccessID("thisisanID")
 	assert.Nil(t, err)
-	testConf.SetSessionToken("thisisaToken")
-	assert.Equal(t, "henry.wu@uber.com", testConf.GetUser())
-	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/", testConf.GetOutputBucket())
-	expectedRawString := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&accessID=thisisanID&db=default&missingAsEmptyString=true&region=us-east-1&secretAccessKey=thisisaKey&sessionToken=thisisaToken&tag=&workgroupName=henry_wu"
-	expectedSafeString := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&accessID=*&db=default&missingAsEmptyString=true&region=us-east-1&secretAccessKey=*&sessionToken=*&tag=&workgroupName=henry_wu"
+	testConf.SessionToken = "thisisaToken"
+	assert.Equal(t, "henry.wu@uber.com", testConf.User)
+	assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/", testConf.OutputBucket())
+	expectedRawString := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&accessID=thisisanID&db=default&region=us-east-1&secretAccessKey=thisisaKey&sessionToken=thisisaToken&tag=&workgroupName=henry_wu"
+	expectedSafeString := "s3://henry.wu%40uber.com:@fake-query-results-arbitrary-bucket?WGRemoteCreation=true&accessID=*&db=default&region=us-east-1&secretAccessKey=*&sessionToken=*&tag=&workgroupName=henry_wu"
 	actualRaw := testConf.Stringify()
 	actualSafe := testConf.SafeStringify()
 	assert.Equal(t, expectedRawString, actualRaw)
 	assert.Equal(t, expectedSafeString, actualSafe)
 
 	x, err := NewConfig(expectedRawString)
-	assert.Equal(t, x.GetOutputBucket(), s3bucket)
+	assert.Equal(t, x.OutputBucket(), s3bucket)
 	assert.Nil(t, err)
 }
 
@@ -124,50 +126,50 @@ func TestConfig_SetMaskedColumnValue(t *testing.T) {
 
 func TestConfig_SetMetrics(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetMetrics(true)
-	assert.True(t, testConf.IsMetricsEnabled())
-	testConf.SetMetrics(false)
-	assert.False(t, testConf.IsMetricsEnabled())
+	testConf.MetricsEnabled = true
+	assert.True(t, testConf.MetricsEnabled)
+	testConf.MetricsEnabled = false
+	assert.False(t, testConf.MetricsEnabled)
 }
 
 func TestConfig_SetLogging(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetLogging(true)
-	assert.True(t, testConf.IsLoggingEnabled())
-	testConf.SetLogging(false)
-	assert.False(t, testConf.IsLoggingEnabled())
+	testConf.LoggingEnabled = true
+	assert.True(t, testConf.LoggingEnabled)
+	testConf.LoggingEnabled = false
+	assert.False(t, testConf.LoggingEnabled)
 }
 
 func TestConfig_IsMissingAsEmptyString(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetMissingAsEmptyString(true)
-	assert.True(t, testConf.IsMissingAsEmptyString())
-	testConf.SetMissingAsEmptyString(false)
-	assert.False(t, testConf.IsMissingAsEmptyString())
+	testConf.MissingAsEmptyString = true
+	assert.True(t, testConf.MissingAsEmptyString)
+	testConf.MissingAsEmptyString = false
+	assert.False(t, testConf.MissingAsEmptyString)
 }
 
 func TestConfig_IsMissingAsDefault(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetMissingAsDefault(true)
-	assert.True(t, testConf.IsMissingAsDefault())
-	testConf.SetMissingAsDefault(false)
-	assert.False(t, testConf.IsMissingAsDefault())
+	testConf.MissingAsDefault = true
+	assert.True(t, testConf.MissingAsDefault)
+	testConf.MissingAsDefault = false
+	assert.False(t, testConf.MissingAsDefault)
 }
 
 func TestConfig_IsMissingAsNil(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetMissingAsNil(true)
-	assert.True(t, testConf.IsMissingAsNil())
-	testConf.SetMissingAsNil(false)
-	assert.False(t, testConf.IsMissingAsNil())
+	testConf.MissingAsNil = true
+	assert.True(t, testConf.MissingAsNil)
+	testConf.MissingAsNil = false
+	assert.False(t, testConf.MissingAsNil)
 }
 
 func TestConfig_IsWGRemoteCreationAllowed(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetWGRemoteCreationAllowed(true)
-	assert.True(t, testConf.IsWGRemoteCreationAllowed())
-	testConf.SetWGRemoteCreationAllowed(false)
-	assert.False(t, testConf.IsWGRemoteCreationAllowed())
+	testConf.WGRemoteCreation = true
+	assert.True(t, testConf.WGRemoteCreation)
+	testConf.WGRemoteCreation = false
+	assert.False(t, testConf.WGRemoteCreation)
 }
 
 func TestConfig_NewDefaultConfig(t *testing.T) {
@@ -192,89 +194,102 @@ func TestConfig_NewConfig(t *testing.T) {
 	assert.Nil(t, x)
 }
 
+// TestConfig_NewConfig_QueryTimeoutOverflowRejected pins a fix for an
+// integer overflow: isQueryTimeOut converts DDLQueryTimeout/DMLQueryTimeout
+// (seconds) to a time.Duration via time.Duration(n) * time.Second. A large
+// enough n overflows int64 and wraps negative, making time.Since(start) >
+// timeout true immediately - every query would appear to have already timed
+// out. NewConfig must reject such values instead of silently accepting them.
+func TestConfig_NewConfig_QueryTimeoutOverflowRejected(t *testing.T) {
+	for _, key := range []string{"DDLQueryTimeout", "DMLQueryTimeout"} {
+		for _, bad := range []string{"0", "-1", "99999999999"} {
+			dsn := "s3://out/bucket/?db=x&region=us-east-1&" + key + "=" + bad
+			_, err := NewConfig(dsn)
+			assert.Error(t, err, "%s=%s: want error, got nil", key, bad)
+		}
+	}
+
+	// A sane value must still work.
+	cfg, err := NewConfig("s3://out/bucket/?db=x&region=us-east-1&DDLQueryTimeout=3600&DMLQueryTimeout=60")
+	assert.NoError(t, err)
+	assert.Equal(t, 3600, cfg.ServiceLimit.DDLQueryTimeout)
+	assert.Equal(t, 60, cfg.ServiceLimit.DMLQueryTimeout)
+}
+
 func TestConfig_GetWorkgroup(t *testing.T) {
 	wg := NewWG("henry_wu", nil, nil)
 	testConf := NewNoOpsConfig()
 	err := testConf.SetWorkGroup(wg)
 	assert.Nil(t, err)
-	w := testConf.GetWorkgroup()
+	w := *testConf.WorkGroup
 	assert.Empty(t, w.Tags.tags)
 }
 
 func TestConfig_SetReadOnly(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetReadOnly(false)
-	assert.False(t, testConf.IsReadOnly())
+	testConf.ReadOnly = false
+	assert.False(t, testConf.ReadOnly)
 }
 
 func TestConfig_GetDB(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	assert.Equal(t, DefaultDBName, testConf.GetDB())
-	testConf.SetDB("")
-	assert.Equal(t, DefaultDBName, testConf.GetDB())
+	assert.Equal(t, DefaultDBName, testConf.DB)
 }
 
 func TestConfig_GetRegion(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	assert.Equal(t, DefaultRegion, testConf.GetRegion())
-	testConf = &Config{
-		dsn:    *new(url.URL),
-		values: url.Values{},
-	}
-	assert.Equal(t, GetFromEnvVal(regionEnvKeys), testConf.GetRegion())
+	assert.Equal(t, DefaultRegion, testConf.RegionOrEnv())
+	testConf = &Config{}
+	assert.Equal(t, GetFromEnvVal(regionEnvKeys), testConf.RegionOrEnv())
 }
 
 func TestConfig_GetAccessID(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	testConf.SetAccessID("abc")
-	assert.Equal(t, "abc", testConf.GetAccessID())
-	testConf = &Config{
-		dsn:    *new(url.URL),
-		values: url.Values{},
-	}
-	assert.Equal(t, GetFromEnvVal(credAccessEnvKey), testConf.GetAccessID())
+	assert.Equal(t, "abc", testConf.AccessIDOrEnv())
+	testConf = &Config{}
+	assert.Equal(t, GetFromEnvVal(credAccessEnvKey), testConf.AccessIDOrEnv())
 }
 
 func TestConfig_GetSecretAccessKey(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	testConf.SetSecretAccessKey("abc")
-	assert.Equal(t, "abc", testConf.GetSecretAccessKey())
-	testConf = &Config{
-		dsn:    *new(url.URL),
-		values: url.Values{},
-	}
-	assert.Equal(t, GetFromEnvVal(credSecretEnvKey), testConf.GetSecretAccessKey())
+	assert.Equal(t, "abc", testConf.SecretAccessKeyOrEnv())
+	testConf = &Config{}
+	assert.Equal(t, GetFromEnvVal(credSecretEnvKey), testConf.SecretAccessKeyOrEnv())
 }
 
 func TestConfig_GetSessionToken(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetSessionToken("abc")
-	assert.Equal(t, "abc", testConf.GetSessionToken())
-	testConf = &Config{
-		dsn:    *new(url.URL),
-		values: url.Values{},
-	}
-	assert.Equal(t, GetFromEnvVal(credSessionEnvKey), testConf.GetSessionToken())
+	testConf.SessionToken = "abc"
+	assert.Equal(t, "abc", testConf.SessionTokenOrEnv())
+	testConf = &Config{}
+	assert.Equal(t, GetFromEnvVal(credSessionEnvKey), testConf.SessionTokenOrEnv())
 }
 
 func TestConfig_WGConfig(t *testing.T) {
-	conf := NewWGConfig(10*DefaultBytesScannedCutoffPerQuery, true, true, false, nil)
+	conf := &athenatypes.WorkGroupConfiguration{
+		BytesScannedCutoffPerQuery:      aws.Int64(10 * DefaultBytesScannedCutoffPerQuery),
+		EnforceWorkGroupConfiguration:   aws.Bool(true),
+		PublishCloudWatchMetricsEnabled: aws.Bool(true),
+		RequesterPaysEnabled:            aws.Bool(false),
+	}
 	wg := NewWG("workgroup1", conf, nil)
 	assert.Equal(t, *wg.Config.BytesScannedCutoffPerQuery, int64(DefaultBytesScannedCutoffPerQuery*10))
 }
 
 func TestConfig_SetMoneyWise(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetMoneyWise(false)
-	assert.False(t, testConf.IsMoneyWise())
-	testConf.SetMoneyWise(true)
-	assert.True(t, testConf.IsMoneyWise())
+	testConf.MoneyWise = false
+	assert.False(t, testConf.MoneyWise)
+	testConf.MoneyWise = true
+	assert.True(t, testConf.MoneyWise)
 }
 
 func TestConfig_SetAWSProfile(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetAWSProfile("development")
-	assert.Equal(t, "development", testConf.GetAWSProfile())
+	testConf.AWSProfile = "development"
+	assert.Equal(t, "development", testConf.AWSProfile)
 }
 
 func TestConfig_SetServiceLimitOverride(t *testing.T) {
@@ -282,36 +297,45 @@ func TestConfig_SetServiceLimitOverride(t *testing.T) {
 
 	testConf := NewNoOpsConfig()
 	_ = testConf.SetOutputBucket(s3bucket)
-	serviceLimitOverride := NewServiceLimitOverride()
 	ddlQueryTimeout := 1000 * 60 // 1000 minutes
-	_ = serviceLimitOverride.SetDDLQueryTimeout(ddlQueryTimeout)
-	testConf.SetServiceLimitOverride(*serviceLimitOverride)
-	testServiceLimitOverride := testConf.GetServiceLimitOverride()
-	assert.Equal(t, ddlQueryTimeout, testServiceLimitOverride.GetDDLQueryTimeout())
+	testConf.ServiceLimit = &ServiceLimitOverride{DDLQueryTimeout: ddlQueryTimeout}
+	assert.Equal(t, ddlQueryTimeout, testConf.ServiceLimit.DDLQueryTimeout)
 
-	expected := "s3://fake-query-results-arbitrary-bucket?DDLQueryTimeout=60000&DMLQueryTimeout=0&WGRemoteCreation=true&db=default&missingAsEmptyString=true&region=us-east-1"
+	expected := "s3://fake-query-results-arbitrary-bucket?DDLQueryTimeout=60000&DMLQueryTimeout=0&WGRemoteCreation=true&db=default&region=us-east-1"
 	assert.Equal(t, expected, testConf.Stringify())
 
 	dmlQueryTimeout := 60 * 60 // 60 minutes
-	_ = serviceLimitOverride.SetDMLQueryTimeout(dmlQueryTimeout)
-	testConf.SetServiceLimitOverride(*serviceLimitOverride)
-	testServiceLimitOverride = testConf.GetServiceLimitOverride()
-	assert.Equal(t, ddlQueryTimeout, testServiceLimitOverride.GetDDLQueryTimeout())
-	assert.Equal(t, dmlQueryTimeout, testServiceLimitOverride.GetDMLQueryTimeout())
+	testConf.ServiceLimit.DMLQueryTimeout = dmlQueryTimeout
+	assert.Equal(t, ddlQueryTimeout, testConf.ServiceLimit.DDLQueryTimeout)
+	assert.Equal(t, dmlQueryTimeout, testConf.ServiceLimit.DMLQueryTimeout)
 
-	expected = "s3://fake-query-results-arbitrary-bucket?DDLQueryTimeout=60000&DMLQueryTimeout=3600&WGRemoteCreation=true&db=default&missingAsEmptyString=true&region=us-east-1"
+	expected = "s3://fake-query-results-arbitrary-bucket?DDLQueryTimeout=60000&DMLQueryTimeout=3600&WGRemoteCreation=true&db=default&region=us-east-1"
 	assert.Equal(t, expected, testConf.Stringify())
 }
 
 func TestConfig_ResultPollIntervalOverride(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	testConf.SetResultPollIntervalSeconds(1)
-	interval := testConf.GetResultPollIntervalSeconds()
+	testConf.ResultPollInterval = time.Duration(1) * time.Second
+	interval := testConf.PollInterval()
 	assert.Equal(t, time.Duration(1)*time.Second, interval)
 }
 
 func TestConfig_ResultPollIntervalDefault(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	interval := testConf.GetResultPollIntervalSeconds()
+	interval := testConf.PollInterval()
 	assert.Equal(t, time.Second*time.Duration(PoolInterval), interval)
+}
+
+// TestConfig_WGRemoteCreationRoundtrip guards against a regression where
+// toQuery skipped WGRemoteCreation=false, so NewConfig(cfg.Stringify())
+// flipped the field back to its default (true).
+func TestConfig_WGRemoteCreationRoundtrip(t *testing.T) {
+	for _, want := range []bool{true, false} {
+		src := NewNoOpsConfig()
+		_ = src.SetOutputBucket("s3://bucket/")
+		src.WGRemoteCreation = want
+		got, err := NewConfig(src.Stringify())
+		assert.Nil(t, err)
+		assert.Equal(t, want, got.WGRemoteCreation)
+	}
 }

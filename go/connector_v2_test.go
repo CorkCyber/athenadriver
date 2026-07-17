@@ -14,7 +14,13 @@ func TestNewConnector(t *testing.T) {
 	cfg := NewNoOpsConfig()
 	c := NewConnector(cfg)
 	assert.NotNil(t, c)
-	assert.Same(t, cfg, c.config)
+	// Config is frozen at construction: an equal copy, not the caller's
+	// pointer, so post-construction mutation can't race live connections.
+	assert.NotSame(t, cfg, c.config)
+	assert.Equal(t, cfg, c.config)
+	cfg.SetMaskedColumnValue("password", "xxx")
+	_, masked := c.config.CheckColumnMasked("password")
+	assert.False(t, masked)
 	assert.Nil(t, c.awsConfig)
 }
 

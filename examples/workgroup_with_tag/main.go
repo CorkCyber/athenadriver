@@ -28,7 +28,7 @@ func main() {
 	wg := drv.NewWG("henry_wu", nil, wgTags)
 	_ = conf.SetWorkGroup(wg)
 	// comment out the line below to allow remote workgroup creation and the query will be successful!!!
-	//conf.SetWGRemoteCreationAllowed(false)
+	//conf.WGRemoteCreation = false
 
 	// 2. Open Connection.
 	dsn := conf.Stringify()
@@ -55,7 +55,7 @@ func main() {
 Sample Output:
 2020/01/20 15:29:52 Workgroup henry_wu doesn't exist and workgroup remote creation is disabled.
 
-After commenting out `conf.SetWGRemoteCreationAllowed(false)` at line 27:
+After commenting out `conf.WGRemoteCreation = false` at line 27:
 2015-01-07T16:00:00.516940Z,https://www.example.com/articles/553
 2015-01-07T16:00:00.902953Z,http://www.example.com/images/501
 2015-01-07T16:00:01.206255Z,https://www.example.com/images/183

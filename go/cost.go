@@ -28,12 +28,12 @@ var athenaUSDPerTB = map[string]float64{
 	"us-gov-west-1":  5.00,
 
 	// More expensive regions
-	"ap-east-1":   5.50, // Hong Kong
+	"ap-east-1":    5.50, // Hong Kong
 	"ca-central-1": 5.50,
-	"me-south-1":  6.50, // Bahrain
-	"us-west-1":   6.75, // N. California
-	"eu-west-3":   7.00, // Paris
-	"sa-east-1":   9.00, // São Paulo
+	"me-south-1":   6.50, // Bahrain
+	"us-west-1":    6.75, // N. California
+	"eu-west-3":    7.00, // Paris
+	"sa-east-1":    9.00, // São Paulo
 }
 
 const (

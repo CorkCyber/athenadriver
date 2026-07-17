@@ -14,7 +14,6 @@ func TestStatement_NumInput(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, _ := connector.Connect(context.Background())
@@ -36,7 +35,6 @@ func TestStatement_Exec(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, _ := connector.Connect(context.Background())
@@ -56,7 +54,6 @@ func TestStatement_Exec_After_Close(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, _ := connector.Connect(context.Background())
@@ -77,7 +74,6 @@ func TestStatement_Query(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, _ := connector.Connect(context.Background())
@@ -97,7 +93,6 @@ func TestStatement_Query_After_Close(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, _ := connector.Connect(context.Background())
@@ -118,7 +113,6 @@ func TestStatement_ColumnConverter(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, _ := connector.Connect(context.Background())
@@ -133,7 +127,6 @@ func TestStatement_Close(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, _ := connector.Connect(context.Background())
@@ -150,7 +143,6 @@ func TestStatement_Close_AfterConnectionClose(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
-		tracer: NewDefaultObservability(testConf),
 	}
 
 	conn, _ := connector.Connect(context.Background())
@@ -161,6 +153,8 @@ func TestStatement_Close_AfterConnectionClose(t *testing.T) {
 	conn.Close()
 	st.connection = nil
 	assert.Equal(t, st.NumInput(), 1)
-	err := st.Close()
-	assert.Equal(t, driver.ErrBadConn, err)
+	// Close is idempotent per driver.Stmt contract (golang/go#16019);
+	// returning ErrBadConn causes database/sql to evict the parent conn.
+	assert.NoError(t, st.Close())
+	assert.NoError(t, st.Close())
 }

@@ -23,7 +23,7 @@ func main() {
 		return
 	}
 	// 2. Open Connection.
-	conf.SetMoneyWise(true)
+	conf.MoneyWise = true
 	dsn := conf.Stringify()
 	db, _ := sql.Open(drv.DriverName, dsn)
 

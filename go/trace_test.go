@@ -12,22 +12,22 @@ import (
 )
 
 func TestObservability_Scope(t *testing.T) {
-	obs := NewNoOpsObservability()
+	obs := NewObservability(NewNoOpsConfig(), nil, nil)
 	assert.Equal(t, obs.Scope(), tally.NoopScope)
 
 	config := NewNoOpsConfig()
-	config.SetMetrics(true)
-	obs = NewDefaultObservability(config)
+	config.MetricsEnabled = true
+	obs = NewObservability(config, nil, nil)
 	assert.Equal(t, obs.Scope(), tally.NoopScope)
 }
 
 func TestObservability_Logger(t *testing.T) {
-	obs := NewNoOpsObservability()
+	obs := NewObservability(NewNoOpsConfig(), nil, nil)
 	assert.NotNil(t, obs.Logger())
 
 	config := NewNoOpsConfig()
-	config.SetLogging(false)
-	obs = NewDefaultObservability(config)
+	config.LoggingEnabled = false
+	obs = NewObservability(config, nil, nil)
 	// Logging disabled -> Logger() returns the discard logger, which is
 	// the same singleton it would return as the default.
 	assert.NotNil(t, obs.Logger())
@@ -35,11 +35,11 @@ func TestObservability_Logger(t *testing.T) {
 
 func TestObservability_Log(t *testing.T) {
 	config := NewNoOpsConfig()
-	config.SetLogging(false)
-	obs := NewDefaultObservability(config)
+	config.LoggingEnabled = false
+	obs := NewObservability(config, nil, nil)
 	obs.Log(-1, "")
-	config.SetLogging(true)
-	obs = NewDefaultObservability(config)
+	config.LoggingEnabled = true
+	obs = NewObservability(config, nil, nil)
 	obs.Log(-1, "")
 	obs.Log(ErrorLevel, "")
 	obs.Log(WarnLevel, "")
@@ -48,13 +48,13 @@ func TestObservability_Log(t *testing.T) {
 }
 
 func TestObservability_SetScope(t *testing.T) {
-	obs := NewNoOpsObservability()
+	obs := NewObservability(NewNoOpsConfig(), nil, nil)
 	obs.SetScope(tally.NoopScope)
 	assert.Equal(t, obs.Scope(), tally.NoopScope)
 }
 
 func TestObservability_SetLogger(t *testing.T) {
-	obs := NewNoOpsObservability()
+	obs := NewObservability(NewNoOpsConfig(), nil, nil)
 	// SetLogger(nil) installs the discard logger rather than leaving the
 	// field nil so callers can always invoke Logger() safely.
 	obs.SetLogger(nil)

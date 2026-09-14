@@ -1,0 +1,10 @@
+go 1.22
+
+use (
+	.
+	./athenareader
+	./examples
+	./scope/otel
+	./scope/statsd
+	./scope/tally
+)

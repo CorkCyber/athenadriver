@@ -11,8 +11,6 @@ import (
 
 	"log/slog"
 
-	"github.com/uber-go/tally/v4"
-
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
@@ -134,7 +132,7 @@ func (c *SQLConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	// tracer is per-connection so concurrent Connect() calls do not race
 	// mutating a shared field on the connector.
 	tracer := NewObservability(c.config, nil, nil)
-	if metrics, ok := ctx.Value(MetricsKey).(tally.Scope); ok {
+	if metrics, ok := ctx.Value(MetricsKey).(Scope); ok {
 		tracer.SetScope(metrics)
 	}
 	if logger, ok := ctx.Value(LoggerKey).(*slog.Logger); ok {

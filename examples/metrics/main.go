@@ -1,71 +1,65 @@
 // SPDX-License-Identifier: MIT
 
+// This example uses the OpenTelemetry adapter shipped in
+// github.com/CorkCyber/athenadriver/scope/otel. Alternatives:
+// scope/tally (uber-go/tally) and scope/statsd (cactus/go-statsd-client).
 package main
 
 import (
 	"context"
 	"database/sql"
-	"io"
 	"log"
 	"time"
 
-	"github.com/cactus/go-statsd-client/v5/statsd"
-	tallystatsd "github.com/uber-go/tally/v4/statsd"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/exporters/stdout/stdoutmetric"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 
-	"github.com/uber-go/tally/v4"
 	secret "github.com/CorkCyber/athenadriver/examples/constants"
-	drv "github.com/CorkCyber/athenadriver/go"
+	otelscope "github.com/CorkCyber/athenadriver/scope/otel"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
-func newScope() (tally.Scope, io.Closer) {
-	statter, _ := statsd.NewBufferedClient("127.0.0.1:8125",
-		"stats", 100*time.Millisecond, 1440)
-
-	reporter := tallystatsd.NewReporter(statter, tallystatsd.Options{
-		SampleRate: 1.0,
-	})
-
-	scope, closer := tally.NewRootScope(tally.ScopeOptions{
-		Prefix:   "henrywu_test_metrics_service",
-		Tags:     map[string]string{},
-		Reporter: reporter,
-	}, time.Second)
-
-	return scope, closer
-}
-
 func main() {
-	// 1. Set AWS Credential in Driver Config.
+	// 1. OpenTelemetry setup — stdout exporter for demo purposes.
+	// Swap in an OTLP exporter (go.opentelemetry.io/otel/exporters/otlp/otlpmetric)
+	// to ship to a real collector.
+	exporter, err := stdoutmetric.New()
+	if err != nil {
+		log.Fatal(err)
+	}
+	provider := sdkmetric.NewMeterProvider(
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exporter,
+			sdkmetric.WithInterval(2*time.Second))),
+	)
+	defer provider.Shutdown(context.Background())
+	otel.SetMeterProvider(provider)
+
+	// 2. Driver config.
 	conf, err := drv.NewDefaultConfig(secret.OutputBucket, secret.Region,
 		secret.AccessID, secret.SecretAccessKey)
 	if err != nil {
 		log.Fatal(err)
-		return
 	}
+	conf.MetricsEnabled = true
 
-	// 2. Open Connection.
-	dsn := conf.Stringify()
-	db, _ := sql.Open(drv.DriverName, dsn)
+	db, _ := sql.Open(drv.DriverName, conf.Stringify())
 
-	// 3. Query cancellation after 2 seconds
-	// Create tally scope
-	scope, _ := newScope()
-	// Create context and attach tally scope with context
+	// 3. Attach the otel Scope adapter to context.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ctx = context.WithValue(ctx, drv.MetricsKey, scope)
+	ctx = context.WithValue(ctx, drv.MetricsKey,
+		otelscope.New(otel.Meter("athenadriver_example")))
+
 	rows, err := db.QueryContext(ctx, "select count(*) from sampledb.elb_logs")
 	if err != nil {
 		log.Fatal(err)
-		return
 	}
 	defer rows.Close()
 }
 
 /*
-Sample Output:
-Run nc in another terminal, so you can use the metrics is reported like below:
-$nc 8125 -l -u
-stats.henrywu_test_metrics_service.awsathena.connector.connect:0.140147|ms
-stats.henrywu_test_metrics_service.awsathena.query.workgroup:0.000607|msstats.henrywu_test_metrics_service.awsathena.query.startqueryexecution:1191.644566|msstats.henrywu_test_metrics_service.awsathena.query.queryexecutionstatesucceeded:3320.820154|ms
+The stdout exporter prints periodic metric snapshots. In real deployments
+swap it for an OTLP exporter targeting your collector / Prometheus /
+Datadog / etc.
 */

@@ -1,4 +1,4 @@
-module github.com/CorkCyber/athenadriver
+module github.com/CorkCyber/athenadriver/v2
 
 go 1.22
 
@@ -11,7 +11,6 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.33.4
 	github.com/aws/smithy-go v1.22.1
 	github.com/stretchr/testify v1.9.0
-	github.com/uber-go/tally/v4 v4.1.17
 )
 
 require (
@@ -24,11 +23,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sso v1.24.8 // indirect
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.28.7 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
-	github.com/golang/mock v1.6.0 // indirect
 	github.com/kr/pretty v0.1.0 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
-	github.com/twmb/murmur3 v1.1.8 // indirect
-	go.uber.org/atomic v1.11.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )

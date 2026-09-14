@@ -10,7 +10,7 @@ _Nothing yet. v2.0.0 is the current target; see below._
 
 ## [2.0.0] — aws-sdk-go-v2 + typed Config (`CorkCyber/athenadriver`)
 
-First release under `github.com/CorkCyber/athenadriver`. Fork chain:
+First release under `github.com/CorkCyber/athenadriver/v2`. Fork chain:
 [uber](https://github.com/uber/athenadriver) (dormant since 2025-05-31) →
 [grafana](https://github.com/grafana/athenadriver) (carried the v1 → v2
 AWS SDK port) → this repo.
@@ -19,7 +19,7 @@ AWS SDK port) → this repo.
 
 Full migration steps live in the [README v2 migration guide](README.md#v200-migration-guide).
 
-1. **Module path** — `uber/athenadriver` → `CorkCyber/athenadriver`. `drv.DriverName` unchanged.
+1. **Module path** — `uber/athenadriver` → `CorkCyber/athenadriver/v2` (Go semantic import versioning for a v2+ module). Import the driver as `github.com/CorkCyber/athenadriver/v2/go`. `drv.DriverName` unchanged.
 2. **AWS SDK v1 → v2** — types move to `aws-sdk-go-v2/service/athena/types`; credentials flow through `aws.Config`. DSN keys unchanged.
 3. **`Config` is a typed struct** — assign fields directly. Validating setters kept: `SetOutputBucket`, `SetRegion`, `SetAccessID`, `SetSecretAccessKey`, `SetWorkGroup`.
 4. **Logger** — `*zap.Logger` → `*slog.Logger`. Silent runtime break for callers that inject via `LoggerKey` ctx.
@@ -28,6 +28,10 @@ Full migration steps live in the [README v2 migration guide](README.md#v200-migr
 7. **`ServiceLimitOverride` is a typed struct** — assign `DDLQueryTimeout` / `DMLQueryTimeout` fields. Setters + `ErrServiceLimitOverride` removed.
 8. **Constructors collapsed** — `NewDefaultObservability`, `NewNoOpsObservability`, `NewWGConfig`, `NewNonOpsRows` removed. Use `NewObservability(cfg, nil, nil)` and struct literals.
 9. **Poll defaults** — backoff `1.5×` (was `1.0`), cap `30s` (was equal to initial interval). New constants: `PollBackoffMultiplier`, `PollMaxInterval`. Opt out via `Config.ResultPollBackoffMultiplier` and `Config.ResultPollMaxInterval`.
+10. **Metrics decoupled from tally.** Driver depends only on stdlib for its metrics surface (`Scope` / `Counter` / `Timer` interfaces + `NoopScope`). `tally.Scope` in a `MetricsKey` ctx no longer type-asserts. Bridge via one of the shipped adapter modules or a ~15-line custom one:
+    - `github.com/CorkCyber/athenadriver/scope/otel`
+    - `github.com/CorkCyber/athenadriver/scope/tally`
+    - `github.com/CorkCyber/athenadriver/scope/statsd`
 
 ### Added
 

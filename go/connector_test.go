@@ -12,7 +12,6 @@ import (
 	"log/slog"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/uber-go/tally/v4"
 )
 
 func TestSQLConnector(t *testing.T) {
@@ -42,7 +41,7 @@ func TestSQLConnector_Connect(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, LoggerKey, logger)
-	ctx = context.WithValue(ctx, MetricsKey, tally.NoopScope)
+	ctx = context.WithValue(ctx, MetricsKey, NoopScope)
 	conn, err := connector.Connect(ctx)
 	assert.Nil(t, err)
 	prepStatement, err := conn.Prepare("select 123")

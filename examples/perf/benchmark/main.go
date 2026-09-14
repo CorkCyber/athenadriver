@@ -13,7 +13,7 @@ import (
 	"time"
 
 	secret "github.com/CorkCyber/athenadriver/examples/constants"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {

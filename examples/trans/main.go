@@ -7,7 +7,7 @@ import (
 	"database/sql"
 	"log"
 
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 var (

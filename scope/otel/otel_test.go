@@ -1,0 +1,135 @@
+// SPDX-License-Identifier: MIT
+
+package otel
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"testing"
+	"time"
+
+	drv "github.com/CorkCyber/athenadriver/v2/go"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+)
+
+func TestAdapterSatisfiesScope(t *testing.T) {
+	var _ drv.Scope = New(otel.Meter("test"))
+}
+
+// TestAdapterLiveFire wires the adapter to a ManualReader-backed
+// MeterProvider and asserts the emitted counter + histogram show up with
+// the values we recorded — end-to-end proof the Int64Counter /
+// Float64Histogram plumbing actually reaches otel's collector layer.
+func TestAdapterLiveFire(t *testing.T) {
+	reader := metric.NewManualReader()
+	provider := metric.NewMeterProvider(metric.WithReader(reader))
+	defer provider.Shutdown(context.Background())
+
+	s := New(provider.Meter("athenadriver.test"))
+	s.Counter("driver.calls").Inc(3)
+	s.Counter("driver.calls").Inc(2) // second lookup exercises the cache
+	s.Timer("driver.latency").Record(42 * time.Millisecond)
+	s.Timer("driver.latency").Record(8 * time.Millisecond)
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(rm.ScopeMetrics) == 0 {
+		t.Fatal("no scope metrics collected")
+	}
+
+	var counterSum int64
+	var histCount uint64
+	var histSum float64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			switch data := m.Data.(type) {
+			case metricdata.Sum[int64]:
+				if m.Name == "driver.calls" {
+					for _, dp := range data.DataPoints {
+						counterSum += dp.Value
+					}
+				}
+			case metricdata.Histogram[float64]:
+				if m.Name == "driver.latency" {
+					for _, dp := range data.DataPoints {
+						histCount += dp.Count
+						histSum += dp.Sum
+					}
+				}
+			}
+		}
+	}
+	if counterSum != 5 {
+		t.Errorf("counter sum = %d, want 5", counterSum)
+	}
+	if histCount != 2 {
+		t.Errorf("histogram count = %d, want 2", histCount)
+	}
+	// Record() writes milliseconds. 42 + 8 = 50. Allow float slack.
+	if histSum < 49.9 || histSum > 50.1 {
+		t.Errorf("histogram sum = %v ms, want ~50", histSum)
+	}
+}
+
+// TestAdapterConcurrentLookup exercises the sync.Mutex-guarded
+// counter/timer cache under `-race`. Many goroutines racing on the same
+// and on different names — must never deadlock or corrupt the map.
+func TestAdapterConcurrentLookup(t *testing.T) {
+	reader := metric.NewManualReader()
+	provider := metric.NewMeterProvider(metric.WithReader(reader))
+	defer provider.Shutdown(context.Background())
+	s := New(provider.Meter("concurrent.test"))
+
+	const goroutines = 32
+	const perGoroutine = 128
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func(id int) {
+			defer wg.Done()
+			for i := 0; i < perGoroutine; i++ {
+				name := fmt.Sprintf("k%d", (id+i)%4) // 4 shared names
+				s.Counter(name).Inc(1)
+				s.Timer(name).Record(time.Microsecond)
+			}
+		}(g)
+	}
+	wg.Wait()
+
+	var rm metricdata.ResourceMetrics
+	if err := reader.Collect(context.Background(), &rm); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	// Just prove metrics were recorded end-to-end; exact per-key totals are
+	// deterministic (goroutines * perGoroutine) but the assertion above
+	// under -race is the point.
+	var total int64
+	for _, sm := range rm.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if s, ok := m.Data.(metricdata.Sum[int64]); ok {
+				for _, dp := range s.DataPoints {
+					total += dp.Value
+				}
+			}
+		}
+	}
+	if want := int64(goroutines * perGoroutine); total != want {
+		t.Errorf("counter total = %d, want %d", total, want)
+	}
+}
+
+// TestAdapterNilMeter pins the nil-input contract: New(nil) degrades to
+// the driver's NoopScope instead of panicking on first use.
+func TestAdapterNilMeter(t *testing.T) {
+	s := New(nil)
+	if s != drv.NoopScope {
+		t.Fatalf("New(nil) = %T, want drv.NoopScope", s)
+	}
+	s.Counter("k").Inc(1) // must not panic
+	s.Timer("t").Record(time.Millisecond)
+}

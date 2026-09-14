@@ -6,7 +6,7 @@ import (
 	"database/sql"
 
 	"github.com/CorkCyber/athenadriver/athenareader/lib/configfx"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 	"go.uber.org/fx"
 )
 

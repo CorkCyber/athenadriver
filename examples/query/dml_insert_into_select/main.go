@@ -8,7 +8,7 @@ import (
 
 	secret "github.com/CorkCyber/athenadriver/examples/constants"
 
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 // https://aws.amazon.com/about-aws/whats-new/2019/09/amazon-athena-adds-support-inserting-data-into-table-results-of-select-query/

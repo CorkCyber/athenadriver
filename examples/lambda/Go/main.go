@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
 	"os"

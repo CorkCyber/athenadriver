@@ -149,7 +149,7 @@ const PCGetDriverVersion = "get_driver_version"
 
 // version is set at build time via ldflags:
 //
-//	go build -ldflags "-X github.com/CorkCyber/athenadriver/go.version=v2.0.0"
+//	go build -ldflags "-X github.com/CorkCyber/athenadriver/v2/go.version=v2.0.0"
 //
 // Leave empty for non-release builds; DriverVersion falls back to the VCS
 // revision (or "dev") in that case.

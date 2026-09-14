@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 	"go.uber.org/config"
 	"go.uber.org/fx"
 )

@@ -8,7 +8,7 @@ import (
 
 	secret "github.com/CorkCyber/athenadriver/examples/constants"
 
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 // main will query Athena and print all columns and rows information in csv format

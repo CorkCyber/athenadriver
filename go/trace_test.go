@@ -8,17 +8,16 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/uber-go/tally/v4"
 )
 
 func TestObservability_Scope(t *testing.T) {
 	obs := NewObservability(NewNoOpsConfig(), nil, nil)
-	assert.Equal(t, obs.Scope(), tally.NoopScope)
+	assert.Equal(t, obs.Scope(), NoopScope)
 
 	config := NewNoOpsConfig()
 	config.MetricsEnabled = true
 	obs = NewObservability(config, nil, nil)
-	assert.Equal(t, obs.Scope(), tally.NoopScope)
+	assert.Equal(t, obs.Scope(), NoopScope)
 }
 
 func TestObservability_Logger(t *testing.T) {
@@ -49,8 +48,8 @@ func TestObservability_Log(t *testing.T) {
 
 func TestObservability_SetScope(t *testing.T) {
 	obs := NewObservability(NewNoOpsConfig(), nil, nil)
-	obs.SetScope(tally.NoopScope)
-	assert.Equal(t, obs.Scope(), tally.NoopScope)
+	obs.SetScope(NoopScope)
+	assert.Equal(t, obs.Scope(), NoopScope)
 }
 
 func TestObservability_SetLogger(t *testing.T) {
@@ -63,6 +62,6 @@ func TestObservability_SetLogger(t *testing.T) {
 
 func TestObservability_NewObservability(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	obs := NewObservability(NewNoOpsConfig(), logger, tally.NoopScope)
+	obs := NewObservability(NewNoOpsConfig(), logger, NoopScope)
 	assert.NotNil(t, obs.Logger())
 }

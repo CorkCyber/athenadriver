@@ -16,7 +16,7 @@ drop or override the replace.
 | `auth/` | The supported AWS authentication methods. |
 | `lambda/Go/` | Running Athena queries from an AWS Lambda function. |
 | `logging/` | Wiring an `slog.Logger` via context. |
-| `metrics/` | Wiring a tally scope with a statsd reporter. |
+| `metrics/` | Wiring an OpenTelemetry meter via the `scope/otel` adapter. |
 | `maskcolumn/` | Masking columns with substitute values. |
 | `pc_get_driver_version/`, `pc_get_query_id/`, `pc_get_query_id_status/`, `pc_stop_query_id/` | Each pseudo-command (`pc:get_driver_version`, etc.). |
 | `ping/` | Health check / `db.Ping`. |

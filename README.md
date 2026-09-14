@@ -51,8 +51,8 @@ the table:
 
 The public API surface from the upstream is preserved where possible.
 The notable break is the import path
-(`github.com/CorkCyber/athenadriver`); see CHANGELOG for the full
-migration notes.
+(`github.com/CorkCyber/athenadriver/v2`, per Go semantic import
+versioning); see CHANGELOG for the full migration notes.
 
 Upstream contributions are welcome here; PRs that originally targeted
 `uber/athenadriver` or `grafana/athenadriver` and never landed are good
@@ -73,13 +73,13 @@ The PDF version of AthenaDriver document is available at [ :scroll: ](resources/
 
 ## v2.0.0 Migration Guide
 
-Nine breaking changes, batched into one release.
+Ten breaking changes, batched into one release.
 
 ### Summary
 
 | # | Change | Migration |
 |---|--------|-----------|
-| 1 | Module path `uber/athenadriver` → `CorkCyber/athenadriver` | Rewrite imports. `sql.Open("awsathena", dsn)` unchanged. |
+| 1 | Module path `uber/athenadriver` → `CorkCyber/athenadriver/v2` | Rewrite imports (`.../v2/go`). `sql.Open("awsathena", dsn)` unchanged. |
 | 2 | `aws-sdk-go` → `aws-sdk-go-v2` | Update AWS type imports + pointer helpers. |
 | 3 | `Config` is a typed struct | Assign fields; a few validating setters remain. |
 | 4 | Logger: `*zap.Logger` → `*slog.Logger` | Inject `*slog.Logger` via `LoggerKey` ctx. |
@@ -88,13 +88,14 @@ Nine breaking changes, batched into one release.
 | 7 | `ServiceLimitOverride` is a typed struct | Assign fields. |
 | 8 | Observability + WG helper constructors collapsed | One constructor / struct literal. |
 | 9 | Poll defaults changed (exponential backoff, 30s cap) | Opt out with two field assignments. |
+| 10 | Metrics decoupled from tally | Import a `scope/*` adapter or write ~15 lines of glue. |
 
 ### 1. Module path
 
 ```
 github.com/uber/athenadriver       (v1)
 github.com/grafana/athenadriver    (v2 port, transitional)
-github.com/CorkCyber/athenadriver  (v2.0.0)
+github.com/CorkCyber/athenadriver/v2  (v2.0.0)
 ```
 
 ### 2. AWS SDK v1 → v2
@@ -194,6 +195,24 @@ cfg.ResultPollMaxInterval       = 3 * time.Second
 
 New constants: `PollBackoffMultiplier` (1.5), `PollMaxInterval` (30s). `PoolInterval` (3s initial) unchanged.
 
+### 10. Metrics decoupled from tally
+
+Driver core depends only on stdlib for its metrics surface. `MetricsKey` ctx values must now satisfy `athenadriver.Scope` (3 methods) — a raw `tally.Scope` no longer type-asserts. Pick an adapter, or write your own in ~15 lines.
+
+Ready-made:
+
+| Backend | Module |
+|---------|--------|
+| OpenTelemetry | `github.com/CorkCyber/athenadriver/scope/otel` |
+| tally | `github.com/CorkCyber/athenadriver/scope/tally` |
+| statsd | `github.com/CorkCyber/athenadriver/scope/statsd` |
+
+```go
+import tallyscope "github.com/CorkCyber/athenadriver/scope/tally"
+
+ctx = context.WithValue(ctx, drv.MetricsKey, tallyscope.New(rootScope))
+```
+
 ## Features
 
 Except the basic features provided by Go `database/sql` like error handling, database pool and reconnection, `athenadriver` supports the following features out of box:
@@ -215,7 +234,7 @@ Except the basic features provided by Go `database/sql` like error handling, dat
 - Query with Athena Query ID(QID) - (the ultimate money saver! :money_with_wings: )
 - Pseudo commands on the `database/sql` interface: `get_driver_version`, `get_query_id`, `get_query_id_status`, `stop_query_id` [:link:](#pseudo-commands)
 - Built-in `log/slog` logging support [:link:](#enable-driver-logging)
-- Builtin metrics support with tally [:link:](#enable-metrics)
+- Bring-your-own metrics via a 3-method `Scope` interface; ready-made adapters for OpenTelemetry, tally, and statsd [:link:](#enable-metrics)
 
 `athenadriver` can extremely simplify your code. Check [athenareader](https://github.com/CorkCyber/athenadriver/tree/master/athenareader) out as an example and a convenient tool for your Athena query in command line. 
 
@@ -250,7 +269,7 @@ For more details on `athenadriver`'s support on AWS credentials & S3 query resul
 `athenadriver` requires Go 1.22+. Add the driver to your module:
 
 ```bash
-go get github.com/CorkCyber/athenadriver/go
+go get github.com/CorkCyber/athenadriver/v2/go
 ```
 
 To install the `athenareader` CLI tool:
@@ -263,7 +282,7 @@ go install github.com/CorkCyber/athenadriver/athenareader@latest
 
 The repository is split into three Go modules:
 
-- `github.com/CorkCyber/athenadriver` — the driver itself (`./go/...`).
+- `github.com/CorkCyber/athenadriver/v2` — the driver itself (`./go/...`).
 - `github.com/CorkCyber/athenadriver/athenareader` — the CLI tool.
 - `github.com/CorkCyber/athenadriver/examples` — runnable example
   programs, each in its own subdirectory.
@@ -272,7 +291,7 @@ The repository is split into three Go modules:
 
 ```bash
 $ go test -race ./go/...
-ok    github.com/CorkCyber/athenadriver/go
+ok    github.com/CorkCyber/athenadriver/v2/go
 ```
 
 `make test` and `make cover` are equivalent shortcuts; `make cover`
@@ -298,7 +317,7 @@ credential chain (env vars, `~/.aws/config`, IMDS, etc.).
 `athenadriver` is very easy to use. What you need to do it to import it in your code and then use the standard Go `database/sql` as usual.
 
 ```go
-import athenadriver "github.com/CorkCyber/athenadriver/go"
+import athenadriver "github.com/CorkCyber/athenadriver/v2/go"
 ```
 
 The following are coding examples to demonstrate `athenadriver`'s features and how you should use `athenadriver` in your Go application.
@@ -313,7 +332,7 @@ package main
 
 import (
 	"database/sql"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -462,7 +481,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -521,7 +540,7 @@ package main
 import (
 	"database/sql"
 	"log"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -590,7 +609,7 @@ package main
 
 import (
 	"database/sql"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -679,7 +698,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -746,7 +765,7 @@ package main
 import (
 	"database/sql"
 	"log"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -799,7 +818,7 @@ import (
 	"database/sql"
 	"log"
 	"time"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -851,7 +870,7 @@ import (
 	"database/sql"
 	"log"
 	"time"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -949,7 +968,7 @@ import (
 	"context"
 	"database/sql"
 	"log"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -996,7 +1015,7 @@ import (
 	"database/sql"
 	"os"
 	secret "github.com/CorkCyber/athenadriver/examples/constants"
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -1071,7 +1090,7 @@ import (
 	"os"
 	"time"
 
-	drv "github.com/CorkCyber/athenadriver/go"
+	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
@@ -1116,84 +1135,50 @@ Sample output (with an `slog.NewJSONHandler` and Info-level threshold):
 {"time":"2026-06-15T13:44:26Z","level":"WARN","msg":"query canceled","queryID":"ef4f3f09-a480-445c-84ad-96ecd97a8e90"}
 ```
 
-###  Enable Metrics
+### Enable Metrics
 
-`athenadriver` supports tally metrics reporting builtin. Metrics reporting is by default enabled but implemented as a
- no-op Scope. You need to pass a workable scope to make it work. If you don't want metrics at all, you need to explicitly  call:
+The driver emits counters + timers through a 3-method interface
+(`athenadriver.Scope` / `Counter` / `Timer`) — no vendored metrics
+library. Bring your own backend by supplying a `Scope`. Metrics are
+enabled by default but wired to `NoopScope`, so nothing is emitted
+until you inject one:
 
 ```go
-  Config.MetricsEnabled = false
+conf.MetricsEnabled = true               // (already the default)
+ctx = context.WithValue(ctx, drv.MetricsKey, myScope)
 ```
 
-The following example is to pass in a scope with `statsd` reporter.
+Turn metrics fully off with `conf.MetricsEnabled = false`.
+
+**Ready-made adapters** (each a separate module — install only what
+you use):
+
+| Backend | Module | Constructor |
+|---------|--------|-------------|
+| OpenTelemetry | `github.com/CorkCyber/athenadriver/scope/otel`  | `otelscope.New(metric.Meter)` |
+| tally   | `github.com/CorkCyber/athenadriver/scope/tally`  | `tallyscope.New(tally.Scope)` |
+| statsd  | `github.com/CorkCyber/athenadriver/scope/statsd` | `statsdscope.New(statsd.Statter)` |
+
+Rolling your own backend is ~15 lines of glue — the interface only
+has two methods (`Counter.Inc(int64)` and `Timer.Record(time.Duration)`).
+See any of the three adapter packages for a reference.
+
+**Example — OpenTelemetry** (see `examples/metrics/` for the full
+runnable version with an OTLP-shaped exporter):
 
 ```go
-package main
-
 import (
-	"context"
-	"database/sql"
-	"io"
-	"log"
-	"time"
-	"github.com/cactus/go-statsd-client/v5/statsd"
-	tallystatsd "github.com/uber-go/tally/v4/statsd"
-	drv "github.com/CorkCyber/athenadriver/go"
-	"github.com/uber-go/tally/v4"
+    "go.opentelemetry.io/otel"
+    drv       "github.com/CorkCyber/athenadriver/v2/go"
+    otelscope "github.com/CorkCyber/athenadriver/scope/otel"
 )
 
-func newScope() (tally.Scope, io.Closer) {
-	statter, _ := statsd.NewBufferedClient("127.0.0.1:8125", "stats", 100*time.Millisecond, 1440)
-	reporter := tallystatsd.NewReporter(statter, tallystatsd.Options{
-		SampleRate: 1.0,
-	})
-	scope, closer := tally.NewRootScope(tally.ScopeOptions{
-		Prefix:   "my_test_metrics_service",
-		Tags:     map[string]string{},
-		Reporter: reporter,
-	}, time.Second)
-	return scope, closer
-}
-
-func main() {
-	// 1. Set AWS Credential in Driver Config.
-	conf, _ := drv.NewDefaultConfig("s3://query-results-bucket-test/",
-		"us-east-2", "dummy-to-be-replaced", "dummy-to-be-replaced")
-
-	// 2. Open Connection.
-	dsn := conf.Stringify()
-	db, _ := sql.Open(drv.DriverName, dsn)
-
-	// 3. Query cancellation after 2 seconds
-	// Create tally scope
-	scope, _ := newScope()
-	// Create context and attach tally scope with context
-	ctx, _ := context.WithTimeout(context.Background(), 5*time.Second)
-	ctx = context.WithValue(ctx, drv.MetricsKey, scope)
-	rows, err := db.QueryContext(ctx, "select count(*) from sampledb.elb_logs")
-	if err != nil {
-		log.Fatal(err)
-		return
-	}
-	defer rows.Close()
-}
+ctx = context.WithValue(ctx, drv.MetricsKey,
+    otelscope.New(otel.Meter("athenadriver")))
 ```
 
-Run netcat(`nc`) in another terminal to listen at port `8125` with command:
-
-```bash
-nc 8125 -l -u
-```
-
-Then run the code above, you can see the underlying details of driver are reported as metrics like below:
-
-```bash
-$ nc 8125 -l -u
-stats.my_test_metrics_service.awsathena.connector.connect:0.140147|ms
-stats.my_test_metrics_service.awsathena.query.workgroup:0.000607|ms
-stats.my_test_metrics_service.awsathena.query.startqueryexecution:1191.644566|ms
-stats.my_test_metrics_service.awsathena.query.queryexecutionstatesucceeded:3320.820154|ms
-```
+Metric names all start with `awsathena.` — e.g.
+`awsathena.connector.connect`, `awsathena.query.startqueryexecution`.
 
 ## Limitations of Go/Athena SDK's and `athenadriver`'s Solution
 

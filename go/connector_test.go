@@ -9,7 +9,12 @@ import (
 
 	"io"
 	"log/slog"
+	"os"
+	"path/filepath"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -134,10 +139,129 @@ func TestSQLConnector_Connect_NewSession_Credentials(t *testing.T) {
 	assert.NotNil(t, conn)
 }
 
+// Credentials that come only from the environment must go through
+// config.LoadDefaultConfig's own env resolution (refreshable, one link in
+// the full chain), not get snapshotted into a static provider.
+func TestSQLConnector_EnvOnlyCredentials_UseDefaultChain(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "env-id")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "env-secret")
+
+	testConf := NewNoOpsConfig()
+	_ = testConf.SetRegion("ap-southeast-1")
+	connector := &SQLConnector{config: testConf}
+
+	awsCfg, err := connector.resolveAWSConfig(context.Background())
+	assert.Nil(t, err)
+	creds, err := awsCfg.Credentials.Retrieve(context.Background())
+	assert.Nil(t, err)
+	assert.Equal(t, "env-id", creds.AccessKeyID)
+	assert.NotEqual(t, credentials.StaticCredentialsName, creds.Source,
+		"env-var credentials must not be short-circuited into a static provider")
+}
+
+// Every credential path must be built by LoadDefaultConfig, so env-driven
+// SDK settings apply regardless of which one is taken.
+func TestSQLConnector_StaticCredentials_HonorEnvSDKSettings(t *testing.T) {
+	t.Setenv("AWS_ENDPOINT_URL", "https://athena.example.internal")
+	t.Setenv("AWS_MAX_ATTEMPTS", "7")
+
+	testConf := NewNoOpsConfig()
+	_ = testConf.SetRegion("ap-southeast-1")
+	_ = testConf.SetAccessID("dsn-id")
+	_ = testConf.SetSecretAccessKey("dsn-secret")
+	connector := &SQLConnector{config: testConf}
+
+	awsCfg, err := connector.resolveAWSConfig(context.Background())
+	assert.Nil(t, err)
+	assert.Equal(t, "https://athena.example.internal", aws.ToString(awsCfg.BaseEndpoint))
+	assert.Equal(t, 7, awsCfg.RetryMaxAttempts)
+
+	creds, err := awsCfg.Credentials.Retrieve(context.Background())
+	assert.Nil(t, err)
+	assert.Equal(t, "dsn-id", creds.AccessKeyID)
+}
+
 func TestSQLConnector_Driver(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{
 		config: testConf,
 	}
 	assert.NotNil(t, connector.Driver())
+}
+
+// writeTokenFile drops a throwaway web-identity token on disk. The provider
+// is lazy, so the contents only have to exist, never be valid.
+func writeTokenFile(t *testing.T) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(p, []byte("not-a-real-jwt"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// TestSQLConnector_WebIdentity is the IRSA/EKS branch: all three DSN keys
+// present must produce an AssumeRoleWithWebIdentity provider. No network
+// call happens — the provider only talks to STS on first Retrieve.
+func TestSQLConnector_WebIdentity(t *testing.T) {
+	noDSNCredentials(t)
+	token := writeTokenFile(t)
+	dsn := "s3://fake-bucket/?region=ap-southeast-1" +
+		"&webIdentityRoleARN=arn:aws:iam::123456789012:role/athena-reader" +
+		"&webIdentityTokenFile=" + token +
+		"&webIdentityRoleSessionName=athenadriver-test"
+	cfg, err := NewConfig(dsn)
+	assert.Nil(t, err)
+	assert.Equal(t, "arn:aws:iam::123456789012:role/athena-reader", cfg.WebIdentityRoleARN)
+	assert.Equal(t, token, cfg.WebIdentityTokenFile)
+	assert.Equal(t, "athenadriver-test", cfg.WebIdentityRoleSessionName)
+
+	awsCfg, err := NewConnector(cfg).resolveAWSConfig(context.Background())
+	assert.Nil(t, err)
+	assert.Equal(t, "ap-southeast-1", awsCfg.Region)
+
+	cache, ok := awsCfg.Credentials.(*aws.CredentialsCache)
+	assert.True(t, ok, "web-identity credentials must be cached, not re-assumed per call")
+	assert.True(t, cache.IsCredentialsProvider(&stscreds.WebIdentityRoleProvider{}),
+		"the web identity branch was not taken")
+}
+
+// A half-configured web identity (role ARN but no token file, or the
+// reverse) must fall through to the standard SDK chain rather than build a
+// provider that can never work.
+func TestSQLConnector_WebIdentity_PartialConfigIgnored(t *testing.T) {
+	cases := []struct{ name, arn, tokenFile string }{
+		{"ARN only", "arn:aws:iam::123456789012:role/athena-reader", ""},
+		{"token file only", "", "/does/not/matter"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			noDSNCredentials(t)
+			cfg := NewNoOpsConfig()
+			_ = cfg.SetRegion("ap-southeast-1")
+			cfg.WebIdentityRoleARN = tc.arn
+			cfg.WebIdentityTokenFile = tc.tokenFile
+
+			awsCfg, err := NewConnector(cfg).resolveAWSConfig(context.Background())
+			assert.Nil(t, err)
+			if cache, ok := awsCfg.Credentials.(*aws.CredentialsCache); ok {
+				assert.False(t, cache.IsCredentialsProvider(&stscreds.WebIdentityRoleProvider{}),
+					"a half-configured web identity must not be used")
+			}
+		})
+	}
+}
+
+// An explicit AWSProfile wins over web identity: the profile branch comes
+// first, so LoadDefaultConfig — not stscreds — resolves the credentials.
+func TestSQLConnector_WebIdentity_ProfileWins(t *testing.T) {
+	noDSNCredentials(t)
+	cfg := NewNoOpsConfig()
+	_ = cfg.SetRegion("ap-southeast-1")
+	cfg.AWSProfile = "no-such-profile"
+	cfg.WebIdentityRoleARN = "arn:aws:iam::123456789012:role/athena-reader"
+	cfg.WebIdentityTokenFile = writeTokenFile(t)
+
+	_, err := NewConnector(cfg).resolveAWSConfig(context.Background())
+	assert.NotNil(t, err, "the nonexistent shared profile must still be what fails")
 }

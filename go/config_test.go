@@ -119,9 +119,25 @@ func TestConfig_SetMaskedColumnValue(t *testing.T) {
 	m, b := testConf.CheckColumnMasked("abc")
 	assert.Equal(t, "xxx", m)
 	assert.True(t, b)
+	// Athena lowercases unquoted identifiers in ResultSetMetadata, so
+	// masking must match regardless of the casing on either side.
 	m, b = testConf.CheckColumnMasked("ABC")
-	assert.NotEqual(t, m, "xxx")
-	assert.False(t, b)
+	assert.Equal(t, "xxx", m)
+	assert.True(t, b)
+
+	testConf.SetMaskedColumnValue("SSN", "***")
+	for _, name := range []string{"ssn", "SSN", "Ssn"} {
+		m, b = testConf.CheckColumnMasked(name)
+		assert.Equal(t, "***", m, name)
+		assert.True(t, b, name)
+	}
+
+	// Same for masking rules parsed out of the DSN.
+	cfg, err := NewConfig("s3://out/bucket/?db=x&region=us-east-1&accessID=id&secretAccessKey=sec&masked_Email=hidden")
+	assert.NoError(t, err)
+	m, b = cfg.CheckColumnMasked("email")
+	assert.Equal(t, "hidden", m)
+	assert.True(t, b)
 }
 
 func TestConfig_SetMetrics(t *testing.T) {

@@ -122,7 +122,8 @@ func NewDefaultConfig(outputBucket, region, accessID, secretAccessKey string) (*
 	if err := c.SetSecretAccessKey(secretAccessKey); err != nil {
 		return nil, err
 	}
-	c.ResultPollInterval = time.Duration(PoolInterval) * time.Second
+	// ResultPollInterval stays zero: PollInterval() already yields the
+	// PoolInterval default for a zero field.
 	return c, nil
 }
 
@@ -284,7 +285,10 @@ func (c *Config) fromQuery(q url.Values) error {
 			if c.MaskedColumns == nil {
 				c.MaskedColumns = map[string]string{}
 			}
-			c.MaskedColumns[strings.TrimPrefix(k, "masked_")] = v[0]
+			// Athena reports unquoted identifiers lowercased; keep the keys
+			// lowercase on both write and read so casing never silently
+			// disables masking.
+			c.MaskedColumns[strings.ToLower(strings.TrimPrefix(k, "masked_"))] = v[0]
 		}
 	}
 	return nil
@@ -306,10 +310,12 @@ func parseTags(s string) *WGTags {
 	return t
 }
 
-// String returns the DSN. Equivalent to Stringify; provided for
-// fmt.Stringer compatibility.
+// String returns the credential-masked DSN. It is the fmt.Stringer entry
+// point, so any incidental %v/%+v formatting of a Config (or something
+// embedding one) must not leak live AWS credentials into logs. Use
+// Stringify for the raw DSN.
 func (c *Config) String() string {
-	return c.Stringify()
+	return c.SafeStringify()
 }
 
 // Stringify serializes the Config back to its DSN form. The output is
@@ -510,18 +516,20 @@ func (c *Config) SetWorkGroup(w *Workgroup) error {
 }
 
 // CheckColumnMasked returns the substitute value configured for the
-// given column, if any.
+// given column, if any. Column names are matched case-insensitively:
+// Athena lowercases unquoted identifiers in ResultSetMetadata.
 func (c *Config) CheckColumnMasked(column string) (string, bool) {
-	v, ok := c.MaskedColumns[column]
+	v, ok := c.MaskedColumns[strings.ToLower(column)]
 	return v, ok
 }
 
-// SetMaskedColumnValue records a substitute value for `column`.
+// SetMaskedColumnValue records a substitute value for `column`. The name
+// is stored lowercased; see CheckColumnMasked.
 func (c *Config) SetMaskedColumnValue(column, value string) {
 	if c.MaskedColumns == nil {
 		c.MaskedColumns = map[string]string{}
 	}
-	c.MaskedColumns[column] = value
+	c.MaskedColumns[strings.ToLower(column)] = value
 }
 
 // AccessIDOrEnv returns the explicit access ID or the AWS_ACCESS_KEY_ID

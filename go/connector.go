@@ -71,45 +71,48 @@ func (c *SQLConnector) resolveAWSConfig(ctx context.Context) (aws.Config, error)
 	if c.awsConfig != nil {
 		return *c.awsConfig, nil
 	}
-	profile := c.config.AWSProfile
-	if profile == "" {
-		if c.config.WebIdentityRoleARN != "" && c.config.WebIdentityTokenFile != "" {
-			base := aws.Config{Region: c.config.RegionOrEnv()}
-			stsClient := sts.NewFromConfig(base)
-			provider := stscreds.NewWebIdentityRoleProvider(
-				stsClient, c.config.WebIdentityRoleARN,
-				stscreds.IdentityTokenFile(c.config.WebIdentityTokenFile),
-				func(o *stscreds.WebIdentityRoleOptions) {
-					if c.config.WebIdentityRoleSessionName != "" {
-						o.RoleSessionName = c.config.WebIdentityRoleSessionName
-					}
-				},
-			)
-			base.Credentials = aws.NewCredentialsCache(provider)
-			return base, nil
-		}
-		if c.config.AccessIDOrEnv() != "" {
-			return aws.Config{
-				Region: c.config.RegionOrEnv(),
-				Credentials: credentials.NewStaticCredentialsProvider(
-					c.config.AccessIDOrEnv(),
-					c.config.SecretAccessKeyOrEnv(),
-					c.config.SessionTokenOrEnv(),
-				),
-			}, nil
-		}
-	}
-	// Default: the full aws-sdk-go-v2 chain. LoadDefaultConfig always reads
-	// ~/.aws/config and ~/.aws/credentials and resolves env vars, SSO,
-	// container creds / IRSA and IMDS — there is no v1-style
-	// AWS_SDK_LOAD_CONFIG gate in v2.
+	// Every path goes through LoadDefaultConfig so env-driven SDK settings
+	// (AWS_ENDPOINT_URL_ATHENA, AWS_MAX_ATTEMPTS, FIPS, CA bundle, ...) are
+	// honored no matter which credential mechanism applies. The branches
+	// below only add a credentials provider to the option list.
 	var opts []func(*config.LoadOptions) error
+	profile := c.config.AWSProfile
 	if profile != "" {
 		opts = append(opts, config.WithSharedConfigProfile(profile))
 	}
 	if region := c.config.RegionOrEnv(); region != "" {
 		opts = append(opts, config.WithRegion(region))
 	}
+	switch {
+	case profile != "":
+		// Shared profile wins; LoadDefaultConfig resolves its credentials.
+	case c.config.WebIdentityRoleARN != "" && c.config.WebIdentityTokenFile != "":
+		stsClient := sts.NewFromConfig(aws.Config{Region: c.config.RegionOrEnv()})
+		provider := stscreds.NewWebIdentityRoleProvider(
+			stsClient, c.config.WebIdentityRoleARN,
+			stscreds.IdentityTokenFile(c.config.WebIdentityTokenFile),
+			func(o *stscreds.WebIdentityRoleOptions) {
+				if c.config.WebIdentityRoleSessionName != "" {
+					o.RoleSessionName = c.config.WebIdentityRoleSessionName
+				}
+			},
+		)
+		opts = append(opts, config.WithCredentialsProvider(aws.NewCredentialsCache(provider)))
+	case c.config.AccessID != "":
+		// Only DSN-supplied credentials short-circuit the chain. Credentials
+		// that merely come from the environment fall through so
+		// LoadDefaultConfig resolves (and refreshes) them itself.
+		opts = append(opts, config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(
+				c.config.AccessID,
+				c.config.SecretAccessKeyOrEnv(),
+				c.config.SessionTokenOrEnv(),
+			),
+		))
+	}
+	// LoadDefaultConfig always reads ~/.aws/config and ~/.aws/credentials and
+	// resolves env vars, SSO, container creds / IRSA and IMDS — there is no
+	// v1-style AWS_SDK_LOAD_CONFIG gate in v2.
 	return config.LoadDefaultConfig(ctx, opts...)
 }
 
@@ -171,10 +174,15 @@ func (c *SQLConnector) Driver() driver.Driver {
 //  2. Config.WebIdentityRoleARN + WebIdentityTokenFile — explicit
 //     AssumeRoleWithWebIdentity (only when AWSProfile is unset).
 //  3. DSN-supplied static access key / secret / session token (only when
-//     AWSProfile is unset).
+//     Config.AccessID itself is set and AWSProfile is unset —
+//     environment-only credentials are left to the SDK chain).
 //  4. config.LoadDefaultConfig — the standard aws-sdk-go-v2 chain:
 //     ~/.aws/config and ~/.aws/credentials (honoring Config.AWSProfile
 //     when set), env vars, SSO, container creds / IRSA, and IMDS.
+//
+// Cases 2 and 3 supply their credentials to LoadDefaultConfig as a
+// provider, so env-driven SDK settings (endpoint URL, retry mode, FIPS,
+// CA bundle) apply identically on every path.
 func (c *SQLConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	now := time.Now()
 	// tracer is per-connection so concurrent Connect() calls do not race

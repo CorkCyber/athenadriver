@@ -5,7 +5,6 @@ package athenadriver
 import (
 	"context"
 	"database/sql/driver"
-	"strings"
 )
 
 // Statement is to implement Go's database/sql Statement.
@@ -26,16 +25,14 @@ func (s *Statement) Close() error {
 	return nil
 }
 
-// NumInput returns the number of prepared arguments.
-// It may also return -1, if the driver doesn't know
-// its number of placeholders. In that case, the sql package
-// will not sanity check Exec or Query argument counts.
-// -- From Go `sql/driver`
+// NumInput returns -1: "the driver doesn't know its number of placeholders",
+// so database/sql skips its own arg-count check (see driver.Stmt). Counting
+// `?` with strings.Count is quote-blind — it rejects valid statements that
+// contain a literal `?` inside a string literal. Validation is left to Athena
+// (which checks the ExecutionParameters count server-side) and to
+// interpolateParams' quote-aware count on the DDL path.
 func (s *Statement) NumInput() int {
-	if s.numInput == 0 {
-		s.numInput = strings.Count(s.query, "?")
-	}
-	return s.numInput
+	return -1
 }
 
 // Exec is to execute a prepared statement.

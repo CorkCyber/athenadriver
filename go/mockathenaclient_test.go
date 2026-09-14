@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -52,7 +54,73 @@ func buildPage(cols []athenatypes.ColumnInfo, rows []athenatypes.Row, updateCoun
 	return out
 }
 
+// mockHooks lets a test steer the mock per call site: force a specific AWS
+// error (a real modeled type, not just the generic sentinel), return a
+// different result on successive calls, block a call, or inspect the ctx a
+// call received. The zero value reproduces the mock's default behavior.
+//
+// Hook FIELDS are set before the test's goroutines start and only read
+// afterwards; the mutex guards only the recorded call data.
+type mockHooks struct {
+	mu       sync.Mutex
+	calls    map[string]int
+	stopQIDs []string
+	getQEAt  []time.Time
+
+	// errs forces a specific error from a named method, checked before any
+	// other behavior. Keys are method names ("GetWorkGroup", ...).
+	errs map[string]error
+
+	// getWGFn / getQEFn replace the static fixtures. n is the 1-based call
+	// number, so a test can answer "not found" once and succeed after.
+	getWGFn func(n int) (*athena.GetWorkGroupOutput, error)
+	getQEFn func(n int) (*athena.GetQueryExecutionOutput, error)
+
+	// stopBlocks makes StopQueryExecution hang until its own ctx is done,
+	// simulating an AWS call that outlives the cleanup timeout.
+	stopBlocks bool
+	// ctx state observed on entry to StopQueryExecution.
+	stopCtxErr      error
+	stopCtxDeadline time.Time
+	stopCtxHasDL    bool
+}
+
+// note records a call to method and returns its 1-based call number.
+func (h *mockHooks) note(method string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.calls == nil {
+		h.calls = map[string]int{}
+	}
+	h.calls[method]++
+	return h.calls[method]
+}
+
+func (h *mockHooks) callCount(method string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.calls[method]
+}
+
+func (h *mockHooks) resetCalls() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls = nil
+	h.stopQIDs = nil
+	h.getQEAt = nil
+}
+
+// setErr forces method to fail with err on every call.
+func (h *mockHooks) setErr(method string, err error) {
+	if h.errs == nil {
+		h.errs = map[string]error{}
+	}
+	h.errs[method] = err
+}
+
 type mockAthenaClient struct {
+	mockHooks
+
 	queryToResultsGenMap map[string]genQueryResultsOutputByToken
 
 	CreateWGStatus bool
@@ -129,6 +197,10 @@ func pingPage() genQueryResultsOutputByToken {
 // for forcing a transport-level error (one from the first call, one from
 // a follow-up paginator call).
 func (m *mockAthenaClient) GetQueryResults(_ context.Context, query *athena.GetQueryResultsInput, _ ...func(*athena.Options)) (*athena.GetQueryResultsOutput, error) {
+	m.note("GetQueryResults")
+	if err := m.errs["GetQueryResults"]; err != nil {
+		return nil, err
+	}
 	if *query.QueryExecutionId == "GetQueryResultsWithContext_return_error" {
 		return nil, ErrTestMockGeneric
 	}
@@ -143,6 +215,10 @@ func (m *mockAthenaClient) GetQueryResults(_ context.Context, query *athena.GetQ
 }
 
 func (m *mockAthenaClient) CreateWorkGroup(_ context.Context, _ *athena.CreateWorkGroupInput, _ ...func(*athena.Options)) (*athena.CreateWorkGroupOutput, error) {
+	m.note("CreateWorkGroup")
+	if err := m.errs["CreateWorkGroup"]; err != nil {
+		return nil, err
+	}
 	if !m.CreateWGStatus {
 		return nil, ErrTestMockGeneric
 	}
@@ -150,6 +226,13 @@ func (m *mockAthenaClient) CreateWorkGroup(_ context.Context, _ *athena.CreateWo
 }
 
 func (m *mockAthenaClient) GetWorkGroup(_ context.Context, _ *athena.GetWorkGroupInput, _ ...func(*athena.Options)) (*athena.GetWorkGroupOutput, error) {
+	n := m.note("GetWorkGroup")
+	if err := m.errs["GetWorkGroup"]; err != nil {
+		return nil, err
+	}
+	if m.getWGFn != nil {
+		return m.getWGFn(n)
+	}
 	if !m.GetWGStatus {
 		// Mirror the modeled exception Athena actually returns for an
 		// absent workgroup, so the driver's not-found detection is what
@@ -190,6 +273,10 @@ var queryToQID = map[string]string{
 }
 
 func (m *mockAthenaClient) StartQueryExecution(_ context.Context, s *athena.StartQueryExecutionInput, _ ...func(options *athena.Options)) (*athena.StartQueryExecutionOutput, error) {
+	m.note("StartQueryExecution")
+	if err := m.errs["StartQueryExecution"]; err != nil {
+		return nil, err
+	}
 	m.lastStartInput = s
 	q := *s.QueryString
 	if qid, ok := queryToQID[strings.ToLower(q)]; ok {
@@ -296,6 +383,16 @@ var qidErrors = map[string]error{
 }
 
 func (m *mockAthenaClient) GetQueryExecution(_ context.Context, input *athena.GetQueryExecutionInput, _ ...func(*athena.Options)) (*athena.GetQueryExecutionOutput, error) {
+	n := m.note("GetQueryExecution")
+	m.mu.Lock()
+	m.getQEAt = append(m.getQEAt, time.Now())
+	m.mu.Unlock()
+	if err := m.errs["GetQueryExecution"]; err != nil {
+		return nil, err
+	}
+	if m.getQEFn != nil {
+		return m.getQEFn(n)
+	}
 	qid := *input.QueryExecutionId
 	if err, ok := qidErrors[qid]; ok {
 		return nil, err
@@ -313,7 +410,23 @@ var stopQueryNoError = map[string]struct{}{
 	"c89088ab-595d-4ee6-a9ce-73b55aeb8954": {},
 }
 
-func (m *mockAthenaClient) StopQueryExecution(_ context.Context, input *athena.StopQueryExecutionInput, _ ...func(*athena.Options)) (*athena.StopQueryExecutionOutput, error) {
+func (m *mockAthenaClient) StopQueryExecution(ctx context.Context, input *athena.StopQueryExecutionInput, _ ...func(*athena.Options)) (*athena.StopQueryExecutionOutput, error) {
+	m.note("StopQueryExecution")
+	dl, hasDL := ctx.Deadline()
+	m.mu.Lock()
+	m.stopCtxErr = ctx.Err()
+	m.stopCtxDeadline, m.stopCtxHasDL = dl, hasDL
+	m.stopQIDs = append(m.stopQIDs, *input.QueryExecutionId)
+	m.mu.Unlock()
+	if m.stopBlocks {
+		// Simulate an AWS call that never answers: it ends only when the
+		// cleanup ctx's own timeout fires.
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	if err := m.errs["StopQueryExecution"]; err != nil {
+		return nil, err
+	}
 	if _, ok := stopQueryNoError[*input.QueryExecutionId]; ok {
 		return &athena.StopQueryExecutionOutput{}, nil
 	}

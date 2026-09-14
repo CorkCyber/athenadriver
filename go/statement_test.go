@@ -28,7 +28,12 @@ func TestStatement_NumInput(t *testing.T) {
 	r, e := st.Exec(d)
 	assert.NotNil(t, e)
 	assert.Nil(t, r)
-	assert.Equal(t, st.NumInput(), 1)
+	// -1 == "unknown": database/sql skips its own arg-count check, which a
+	// quote-blind strings.Count(query, "?") got wrong for a literal `?`.
+	assert.Equal(t, -1, st.NumInput())
+
+	st.query = "select ? , 'what?'"
+	assert.Equal(t, -1, st.NumInput())
 }
 
 func TestStatement_Exec(t *testing.T) {
@@ -120,9 +125,9 @@ func TestStatement_Close(t *testing.T) {
 		connection: conn.(*Connection),
 		query:      "abc=?",
 	}
-	assert.Equal(t, st.NumInput(), 1)
+	assert.Equal(t, -1, st.NumInput())
 	st.Close()
-	assert.Equal(t, 0, st.NumInput())
+	assert.Equal(t, -1, st.NumInput())
 }
 
 func TestStatement_Close_AfterConnectionClose(t *testing.T) {
@@ -138,7 +143,7 @@ func TestStatement_Close_AfterConnectionClose(t *testing.T) {
 	}
 	conn.Close()
 	st.connection = nil
-	assert.Equal(t, st.NumInput(), 1)
+	assert.Equal(t, -1, st.NumInput())
 	// Close is idempotent per driver.Stmt contract (golang/go#16019);
 	// returning ErrBadConn causes database/sql to evict the parent conn.
 	assert.NoError(t, st.Close())

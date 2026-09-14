@@ -61,7 +61,7 @@ func TestQueryContext_ParamRouting(t *testing.T) {
 	assert.Equal(t, "select ?", *nm.lastStartInput.QueryString)
 	assert.Equal(t, []string{"1"}, nm.lastStartInput.ExecutionParameters)
 
-	// DDL is interpolated client-side and submitted parameterless —
+	// DDL is interpolated client-side and submitted parameterless:
 	// Athena rejects ExecutionParameters on DDL statements.
 	_, err = c.QueryContext(context.Background(), "ALTER TABLE t SET LOCATION ?",
 		[]driver.NamedValue{{Value: "x"}})
@@ -85,7 +85,7 @@ func TestQueryContext_StructuredFailure(t *testing.T) {
 	assert.Equal(t, int32(2), qErr.ErrorCategory)
 	assert.Equal(t, int32(1001), qErr.ErrorType)
 	assert.True(t, qErr.Retryable)
-	// No StateChangeReason on this fixture — message falls back to the
+	// No StateChangeReason on this fixture, so message falls back to the
 	// AthenaError message.
 	assert.Equal(t, "SYNTAX_ERROR: line 1:8", qErr.Message)
 	assert.Equal(t, qErr.Message, err.Error())
@@ -146,35 +146,14 @@ func TestConfig_RoundTrip_BackoffMultiplierOne(t *testing.T) {
 	assert.Equal(t, 1.0, c2.PollBackoffMultiplier())
 }
 
-func TestLikelyTimeLayout(t *testing.T) {
-	cases := map[string]string{
-		"2024-01-02":                    "2006-01-02",
-		"10:11:12.133":                  "15:04:05.000",
-		"2024-01-02 10:11:12":           "2006-01-02 15:04:05",
-		"2024-01-02 10:11:12.133":       "2006-01-02 15:04:05.000",
-		"2024-01-02 10:11:12.133700":    "2006-01-02 15:04:05.000000",
-		"2024-01-02 10:11:12.133700123": "2006-01-02 15:04:05.000000000",
-	}
-	for in, want := range cases {
-		assert.Equal(t, want, likelyTimeLayout(in), in)
-		// And each shape actually parses via scanTime.
-		at, err := scanTime(in)
-		assert.Nil(t, err, in)
-		assert.True(t, at.Valid, in)
-	}
-	// Nonstandard fraction lengths still parse: Go's time.Parse accepts
-	// an implicit fractional-seconds suffix on the no-fraction layout.
-	at, err := scanTime("2024-01-02 10:11:12.13")
-	assert.Nil(t, err)
-	assert.True(t, at.Valid)
-	// Garbage still errors after the fallback sweep.
-	_, err = scanTime("not-a-time")
-	assert.NotNil(t, err)
-}
+// The former TestLikelyTimeLayout asserted the shape-sniffer's guesses;
+// the sniffer is gone (parseAthenaTimeIn sweeps an ordered layout list
+// directly). Its parse coverage lives in
+// TestDateTime_ScanTimeFractionWidths in datetime_test.go.
 
 // TestScanTime_NoFractionFast pins the perf fix: the most common Athena
 // timestamp shape (no fractional seconds) must parse on the first,
-// shape-dispatched attempt — equivalence with the fallback sweep.
+// shape-dispatched attempt, matching the fallback sweep.
 func TestScanTime_NoFractionFast(t *testing.T) {
 	at, err := scanTime("2024-06-30 23:59:59")
 	assert.Nil(t, err)

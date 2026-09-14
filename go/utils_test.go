@@ -149,33 +149,25 @@ func TestIsQueryTimeOut(t *testing.T) {
 	assert.True(t, isQueryTimeOut(OneHourAgo, "UNKNOWN", testConf))
 }
 
-func TestEscapeBytesBackslash(t *testing.T) {
-	r := escapeBytesBackslash([]byte{}, []byte{'\x00'})
-	assert.Equal(t, "\\0", string(r))
-
-	r = escapeBytesBackslash([]byte{}, []byte{'\n'})
-	assert.Equal(t, "\\n", string(r))
-
-	r = escapeBytesBackslash([]byte{}, []byte{'\r'})
-	assert.Equal(t, "\\r", string(r))
-
-	r = escapeBytesBackslash([]byte{}, []byte{'\x1a'})
-	assert.Equal(t, "\\Z", string(r))
-
+// TestEscapeQuotes pins the Athena/Trino escaping rules: ONLY a single quote
+// is escaped (by doubling). Trino does not interpret backslash escapes inside
+// string literals, so every byte the old MySQL-style escaper rewrote must now
+// round-trip verbatim.
+func TestEscapeQuotes(t *testing.T) {
 	// Single quotes can be escaped by adding another single quote.
 	// https://docs.aws.amazon.com/athena/latest/ug/select.html#select-escaping
-	// https://docs.aws.amazon.com/athena/latest/ug/data-types.html#data-types-considerations
-	r = escapeBytesBackslash([]byte{}, []byte{'\''})
-	assert.Equal(t, string(r), `''`)
+	assert.Equal(t, `''`, escapeQuotes(`'`))
+	assert.Equal(t, `a''''b`, escapeQuotes(`a''b`))
 
-	r = escapeBytesBackslash([]byte{}, []byte{'"'})
-	assert.Equal(t, string(r), `\"`)
-
-	r = escapeBytesBackslash([]byte{}, []byte{'\\'})
-	assert.Equal(t, string(r), `\\`)
-
-	r = escapeBytesBackslash([]byte{}, []byte{'x'})
-	assert.Equal(t, string(r), `x`)
+	// Everything the MySQL-style escaper used to mangle is passed through.
+	assert.Equal(t, "\x00", escapeQuotes("\x00"))
+	assert.Equal(t, "\n", escapeQuotes("\n"))
+	assert.Equal(t, "\r", escapeQuotes("\r"))
+	assert.Equal(t, "\x1a", escapeQuotes("\x1a"))
+	assert.Equal(t, `"`, escapeQuotes(`"`))
+	assert.Equal(t, `\`, escapeQuotes(`\`))
+	assert.Equal(t, `C:\path\n`, escapeQuotes(`C:\path\n`))
+	assert.Equal(t, `x`, escapeQuotes(`x`))
 }
 
 func TestGetFromEnvVal(t *testing.T) {
@@ -278,9 +270,14 @@ func TestFormatString(t *testing.T) {
 			expected: "'This is a description string with no special characters'",
 		},
 		{
-			name:     "Special characters are escaped",
+			name:     "Quotes doubled, other bytes verbatim",
 			input:    "Athena's query's param\n",
-			expected: "'Athena''s query''s param\\n'",
+			expected: "'Athena''s query''s param\n'",
+		},
+		{
+			name:     "Injection payload becomes an inert literal",
+			input:    "1' OR '1'='1' --",
+			expected: "'1'' OR ''1''=''1'' --'",
 		},
 	}
 	for _, tc := range testCases {
@@ -299,17 +296,19 @@ func TestFormatBytes(t *testing.T) {
 		{
 			name:     "Empty byte slice",
 			input:    []byte{},
-			expected: []byte("_binary''"),
+			expected: []byte("''"),
 		},
 		{
 			name:     "No special characters",
 			input:    []byte("This is a description string with no special characters"),
-			expected: []byte("_binary'This is a description string with no special characters'"),
+			expected: []byte("'This is a description string with no special characters'"),
 		},
 		{
-			name:     "Special characters are escaped",
+			// The old `_binary'...'` prefix was MySQL syntax; Trino/Athena
+			// rejects it outright.
+			name:     "Quotes doubled, other bytes verbatim",
 			input:    []byte("Athena's query's param\n"),
-			expected: []byte("_binary'Athena''s query''s param\\n'"),
+			expected: []byte("'Athena''s query''s param\n'"),
 		},
 	}
 	for _, tc := range testCases {

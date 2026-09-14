@@ -8,12 +8,15 @@ import (
 	"database/sql/driver"
 	"math"
 	"math/rand"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/athena"
+	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
+	"github.com/aws/smithy-go"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -134,6 +137,39 @@ func TestConnection_Close(t *testing.T) {
 
 }
 
+// TestConnection_CloseRace guards the Close()/in-flight-query data race:
+// Close must only flip an atomic flag, never nil out fields a concurrent
+// poll dereferences. Run under -race; a closed conn must report
+// driver.ErrBadConn, not panic.
+func TestConnection_CloseRace(t *testing.T) {
+	c := newTestConnWithWG()
+	ctx := context.Background()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 200; i++ {
+			// Errors are the mock's business; what matters here is that a
+			// concurrent Close neither panics nor races. ErrBadConn after
+			// Close is asserted deterministically below.
+			rows, err := c.QueryContext(ctx, "select 1", nil)
+			if err == nil {
+				rows.Close()
+			}
+		}
+	}()
+	time.Sleep(time.Millisecond)
+	assert.NoError(t, c.Close())
+	wg.Wait()
+
+	assert.False(t, c.IsValid())
+	_, err := c.QueryContext(ctx, "select 1", nil)
+	assert.ErrorIs(t, err, driver.ErrBadConn)
+	_, err = c.ExecContext(ctx, "select 1", nil)
+	assert.ErrorIs(t, err, driver.ErrBadConn)
+}
+
 // TestQueryContext_LiteralQuestionMark is the regression guard for
 // running interpolateParams (and its naive `?`-counting check) on the
 // ExecutionParameters path: a `?` inside a string literal is not a
@@ -150,6 +186,55 @@ func TestQueryContext_LiteralQuestionMark(t *testing.T) {
 	assert.Nil(t, err)
 	assert.Equal(t, "select ? , 'what?'", *nm.lastStartInput.QueryString)
 	assert.Equal(t, []string{"1"}, nm.lastStartInput.ExecutionParameters)
+}
+
+// TestQueryContext_StringArgIsQuoted is the SQL-injection regression guard.
+// Athena evaluates every ExecutionParameters entry as a SQL EXPRESSION, so an
+// unquoted string argument is executable SQL. A hostile value must reach
+// Athena as an inert, quote-escaped string literal.
+func TestQueryContext_StringArgIsQuoted(t *testing.T) {
+	t.Parallel()
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		cfg.WorkGroup = nil // skip remote workgroup resolution
+	})
+	nm := c.athenaClient.(*mockAthenaClient)
+
+	_, err := c.QueryContext(context.Background(), "select ?",
+		[]driver.NamedValue{{Value: "1 OR 1=1 --"}})
+	assert.Nil(t, err)
+	assert.Equal(t, "select ?", *nm.lastStartInput.QueryString)
+	assert.Equal(t, []string{"'1 OR 1=1 --'"}, nm.lastStartInput.ExecutionParameters)
+
+	// Embedded quotes are doubled, so the payload cannot close the literal.
+	_, err = c.QueryContext(context.Background(), "select ?",
+		[]driver.NamedValue{{Value: "x' OR '1'='1' --"}})
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"'x'' OR ''1''=''1'' --'"}, nm.lastStartInput.ExecutionParameters)
+
+	// []byte takes the same path.
+	_, err = c.QueryContext(context.Background(), "select ?",
+		[]driver.NamedValue{{Value: []byte("a' OR 1=1")}})
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"'a'' OR 1=1'"}, nm.lastStartInput.ExecutionParameters)
+
+	// Raw is the explicit, opt-in escape hatch for expression arguments.
+	_, err = c.QueryContext(context.Background(), "select ?",
+		[]driver.NamedValue{{Value: Raw("TIMESTAMP '2024-07-01 00:00:00'")}})
+	assert.Nil(t, err)
+	assert.Equal(t, []string{"TIMESTAMP '2024-07-01 00:00:00'"}, nm.lastStartInput.ExecutionParameters)
+}
+
+// CheckNamedValue must keep Raw intact; database/sql's default converter
+// would otherwise flatten it to a plain string and the value would be quoted.
+func TestConnection_CheckNamedValue(t *testing.T) {
+	t.Parallel()
+	c := &Connection{}
+	nv := driver.NamedValue{Value: Raw("CAST(1 AS BIGINT)")}
+	assert.Nil(t, c.CheckNamedValue(&nv))
+	assert.Equal(t, Raw("CAST(1 AS BIGINT)"), nv.Value)
+
+	nv = driver.NamedValue{Value: "plain"}
+	assert.Equal(t, driver.ErrSkip, c.CheckNamedValue(&nv))
 }
 
 func TestConnection_Begin(t *testing.T) {
@@ -237,7 +322,7 @@ func TestConnection_InterpolateParams_Bool(t *testing.T) {
 	assert.NotEqual(t, q, "'0000-00-00'")
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{[]byte{'0'}})
-	assert.Equal(t, "_binary'0'", q)
+	assert.Equal(t, "'0'", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{nil})
 	assert.Equal(t, "NULL", q)
@@ -250,16 +335,31 @@ func TestConnection_InterpolateParams_Bool(t *testing.T) {
 	assert.Nil(t, err)
 }
 
-// We don't support placeholder in string literal for now.
-// https://github.com/go-sql-driver/mysql/pull/490
+// A `?` inside a string literal is data, not a placeholder: substituting it
+// would splice the argument's quotes into the middle of the literal and flip
+// quoting parity for the rest of the statement.
 func TestInterpolateParamsPlaceholderInString(t *testing.T) {
 	c := createTestConnection(t)
 
 	q, err := c.interpolateParams("SELECT 'abc?xyz',?", []driver.Value{int64(42)})
-	// When InterpolateParams support string literal, this should return `"SELECT 'abc?xyz', 42`
-	if err != ErrInvalidQuery {
-		t.Errorf("Expected err=ErrInvalidQuery, got err=%#v, q=%#v", err, q)
-	}
+	assert.Nil(t, err)
+	assert.Equal(t, "SELECT 'abc?xyz',42", q)
+
+	// Doubled quotes inside a literal do not end the literal.
+	q, err = c.interpolateParams("SELECT 'it''s ?',?", []driver.Value{int64(1)})
+	assert.Nil(t, err)
+	assert.Equal(t, "SELECT 'it''s ?',1", q)
+
+	// An argument cannot escape its own literal: its quotes are doubled, so
+	// the trailing `--` stays inside the string value.
+	q, err = c.interpolateParams("SELECT * FROM t WHERE name = ? AND note = 'why?'",
+		[]driver.Value{"x' OR '1'='1' --"})
+	assert.Nil(t, err)
+	assert.Equal(t, "SELECT * FROM t WHERE name = 'x'' OR ''1''=''1'' --' AND note = 'why?'", q)
+
+	// The count check is quote-aware too: still one real placeholder here.
+	_, err = c.interpolateParams("SELECT 'abc?xyz',?", []driver.Value{int64(1), int64(2)})
+	assert.Equal(t, ErrInvalidQuery, err)
 }
 
 func TestInterpolateParamsUint64(t *testing.T) {
@@ -357,28 +457,31 @@ func TestBuildExecutionParams(t *testing.T) {
 			expected:    []string{"'2024-07-02 01:02:03.123456'"},
 		},
 		{
-			name:        "Byte Slice - Caller must use utils.go/FormatBytes before passing in query args",
+			// Athena evaluates each execution parameter as a SQL
+			// expression, so values must arrive quoted.
+			name:        "Byte Slice is quoted",
 			inputArgs:   []driver.Value{[]byte{'0'}},
 			expectedErr: nil,
-			expected:    []string{"0"}, // No change
+			expected:    []string{"'0'"},
 		},
 		{
-			name:        "Byte Slice - After FormatBytes",
-			inputArgs:   []driver.Value{FormatBytes([]byte{'0'})},
-			expectedErr: nil,
-			expected:    []string{"_binary'0'"},
-		},
-		{
-			name:        "String - Caller must use utils.go/FormatString before passing in query args",
+			name:        "String is quoted",
 			inputArgs:   []driver.Value{"This is a string"},
 			expectedErr: nil,
-			expected:    []string{"This is a string"}, // No change
+			expected:    []string{"'This is a string'"},
 		},
 		{
-			name:        "String - After FormatString",
-			inputArgs:   []driver.Value{FormatString("This is a string with ' single quotes and \n chars")},
+			name:        "String with quotes and control chars",
+			inputArgs:   []driver.Value{"This is a string with ' single quotes and \n chars"},
 			expectedErr: nil,
-			expected:    []string{"'This is a string with '' single quotes and \\n chars'"},
+			expected:    []string{"'This is a string with '' single quotes and \n chars'"},
+		},
+		{
+			// Raw is the explicit opt-out for expression arguments.
+			name:        "Raw passes through unquoted",
+			inputArgs:   []driver.Value{Raw("TIMESTAMP " + FormatString("2024-07-01 00:00:00"))},
+			expectedErr: nil,
+			expected:    []string{"TIMESTAMP '2024-07-01 00:00:00'"},
 		},
 		{
 			name:        "Nil -> NULL",
@@ -391,7 +494,7 @@ func TestBuildExecutionParams(t *testing.T) {
 			inputArgs: []driver.Value{int64(-10), uint64(42), 1.23, true, testTime, []byte("This is a slice of bytes"),
 				"This is a string"},
 			expectedErr: nil,
-			expected:    []string{"-10", "42", "1.23", "true", "'2024-07-01 00:00:00'", "This is a slice of bytes", "This is a string"},
+			expected:    []string{"-10", "42", "1.23", "true", "'2024-07-01 00:00:00'", "'This is a slice of bytes'", "'This is a string'"},
 		},
 	}
 	c := createTestConnection(t)
@@ -787,4 +890,333 @@ func Test_PseudoCommand(t *testing.T) {
 	dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
 	assert.Nil(t, er)
 	assert.NotNil(t, dr)
+}
+
+// --- workgroup resolution: AWS error classification -----------------------
+
+// TestResolveWorkgroup_NonNotFoundErrorIsSurfaced is the counter-direction
+// of the isWGNotFound check: a throttling response is NOT "the workgroup is
+// absent", so it must come back to the caller untouched and must never
+// trigger a CreateWorkGroup.
+func TestResolveWorkgroup_NonNotFoundErrorIsSurfaced(t *testing.T) {
+	t.Parallel()
+	throttle := &athenatypes.TooManyRequestsException{
+		Message: aws.String("Rate exceeded"),
+	}
+	cases := []struct {
+		name string
+		err  error
+	}{
+		{"modeled throttling", throttle},
+		{"smithy ThrottlingException", &smithy.GenericAPIError{
+			Code: "ThrottlingException", Message: "Rate exceeded"}},
+		// Same modeled type Athena uses for "not found", but a different
+		// message: a substring check that is too loose would misfire here.
+		{"InvalidRequest, not a miss", &athenatypes.InvalidRequestException{
+			Message: aws.String("WorkGroup name is invalid.")}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newTestConnWithWG(func(_ *Config, nm *mockAthenaClient) {
+				nm.CreateWGStatus = true // would succeed if wrongly called
+				nm.setErr("GetWorkGroup", tc.err)
+			})
+			nm := c.athenaClient.(*mockAthenaClient)
+
+			_, err := c.resolveWorkgroup(context.Background())
+			assert.ErrorIs(t, err, tc.err, "the AWS error must be surfaced verbatim")
+			assert.Zero(t, nm.callCount("CreateWorkGroup"),
+				"a non-not-found error must never be read as 'absent, go create it'")
+			assert.False(t, c.connector.wgVerified.Load())
+		})
+	}
+}
+
+// TestResolveWorkgroup_ConcurrentCreationRecovery covers the lost-the-race
+// path: GetWorkGroup misses, our CreateWorkGroup fails, but a re-check finds
+// the workgroup another connection created meanwhile. Losing that race is
+// success.
+func TestResolveWorkgroup_ConcurrentCreationRecovery(t *testing.T) {
+	t.Parallel()
+	c := newTestConnWithWG(func(_ *Config, nm *mockAthenaClient) {
+		nm.setErr("CreateWorkGroup", &athenatypes.InvalidRequestException{
+			Message: aws.String("WorkGroup already exists")})
+		nm.getWGFn = func(n int) (*athena.GetWorkGroupOutput, error) {
+			if n == 1 {
+				return nil, &athenatypes.InvalidRequestException{
+					Message: aws.String("WorkGroup is not found.")}
+			}
+			return &athena.GetWorkGroupOutput{WorkGroup: &athenatypes.WorkGroup{
+				State: athenatypes.WorkGroupStateEnabled}}, nil
+		}
+	})
+	nm := c.athenaClient.(*mockAthenaClient)
+
+	wg, err := c.resolveWorkgroup(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, "henry_wu", wg.Name)
+	assert.True(t, c.connector.wgVerified.Load())
+	assert.Equal(t, 2, nm.callCount("GetWorkGroup"), "the miss must be re-checked")
+	assert.Equal(t, 1, nm.callCount("CreateWorkGroup"))
+}
+
+// TestResolveWorkgroup_ConcurrentHammer runs resolveWorkgroup from 32
+// goroutines on one connector (run under -race). Cold start: every caller
+// must succeed even though they all observe the same miss. Warm: the
+// verified flag must make every later call a no-op — zero AWS traffic.
+func TestResolveWorkgroup_ConcurrentHammer(t *testing.T) {
+	t.Parallel()
+	const n = 32
+	c := newTestConnWithWG(func(_ *Config, nm *mockAthenaClient) {
+		nm.CreateWGStatus = true // GetWGStatus stays false => always a miss
+	})
+	nm := c.athenaClient.(*mockAthenaClient)
+
+	hammer := func() {
+		var wg sync.WaitGroup
+		for range n {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				w, err := c.resolveWorkgroup(context.Background())
+				assert.NoError(t, err)
+				assert.Equal(t, "henry_wu", w.Name)
+			}()
+		}
+		wg.Wait()
+	}
+
+	hammer()
+	assert.True(t, c.connector.wgVerified.Load())
+	// Cold start is not single-flighted, so CreateWorkGroup may run up to
+	// once per racing caller; what must hold is that it never exceeds that
+	// and that every caller still succeeds.
+	assert.LessOrEqual(t, nm.callCount("CreateWorkGroup"), n)
+
+	nm.resetCalls()
+	hammer()
+	assert.Zero(t, nm.callCount("GetWorkGroup"), "verified workgroup must not be re-checked")
+	assert.Zero(t, nm.callCount("CreateWorkGroup"))
+}
+
+// --- StartQueryExecution input assembly -----------------------------------
+
+var testCtxEncryption = &athenatypes.EncryptionConfiguration{
+	EncryptionOption: athenatypes.EncryptionOptionSseKms,
+	KmsKey:           aws.String("ctx-key"),
+}
+
+// TestQueryContext_StartQueryExecutionInput pins every security- and
+// correctness-relevant field the driver assembles for StartQueryExecution,
+// including the ctx-beats-config precedence rules.
+func TestQueryContext_StartQueryExecutionInput(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		cfg   func(*Config)
+		ctx   func(context.Context) context.Context
+		check func(*testing.T, *athena.StartQueryExecutionInput)
+	}{
+		{
+			name: "ctx encryption beats config encryption",
+			cfg: func(c *Config) {
+				c.ResultEncryption = &athenatypes.EncryptionConfiguration{
+					EncryptionOption: athenatypes.EncryptionOptionSseS3}
+			},
+			ctx: func(ctx context.Context) context.Context {
+				return context.WithValue(ctx, ResultEncryptionKey, testCtxEncryption)
+			},
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				assert.Equal(t, testCtxEncryption, in.ResultConfiguration.EncryptionConfiguration)
+			},
+		},
+		{
+			name: "WithResultEncryption helper",
+			ctx: func(ctx context.Context) context.Context {
+				return WithResultEncryption(ctx, athenatypes.EncryptionOptionCseKms, "helper-key")
+			},
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				enc := in.ResultConfiguration.EncryptionConfiguration
+				assert.Equal(t, athenatypes.EncryptionOptionCseKms, enc.EncryptionOption)
+				assert.Equal(t, "helper-key", aws.ToString(enc.KmsKey))
+			},
+		},
+		{
+			name: "config encryption used when ctx has none",
+			cfg: func(c *Config) {
+				c.ResultEncryption = &athenatypes.EncryptionConfiguration{
+					EncryptionOption: athenatypes.EncryptionOptionSseS3}
+			},
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				assert.Equal(t, athenatypes.EncryptionOptionSseS3,
+					in.ResultConfiguration.EncryptionConfiguration.EncryptionOption)
+			},
+		},
+		{
+			name: "neither set leaves encryption nil",
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				assert.Nil(t, in.ResultConfiguration.EncryptionConfiguration)
+				assert.Nil(t, in.ResultReuseConfiguration)
+				assert.Nil(t, in.ResultConfiguration.ExpectedBucketOwner)
+			},
+		},
+		{
+			name: "WithResultReuse lands in ResultReuseConfiguration",
+			ctx:  func(ctx context.Context) context.Context { return WithResultReuse(ctx, 42*time.Minute) },
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				byAge := in.ResultReuseConfiguration.ResultReuseByAgeConfiguration
+				assert.True(t, byAge.Enabled)
+				assert.Equal(t, int32(42), aws.ToInt32(byAge.MaxAgeInMinutes))
+			},
+		},
+		{
+			name: "result reuse is clamped to 60 minutes",
+			ctx:  func(ctx context.Context) context.Context { return WithResultReuse(ctx, 24*time.Hour) },
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				assert.Equal(t, int32(60),
+					aws.ToInt32(in.ResultReuseConfiguration.ResultReuseByAgeConfiguration.MaxAgeInMinutes))
+			},
+		},
+		{
+			name: "ctx bucket owner beats config bucket owner",
+			cfg:  func(c *Config) { c.ExpectedBucketOwner = "111111111111" },
+			ctx: func(ctx context.Context) context.Context {
+				return context.WithValue(ctx, ExpectedBucketOwnerKey, "222222222222")
+			},
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				assert.Equal(t, "222222222222", aws.ToString(in.ResultConfiguration.ExpectedBucketOwner))
+			},
+		},
+		{
+			name: "config bucket owner used when ctx has none",
+			cfg:  func(c *Config) { c.ExpectedBucketOwner = "111111111111" },
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				assert.Equal(t, "111111111111", aws.ToString(in.ResultConfiguration.ExpectedBucketOwner))
+			},
+		},
+		{
+			name: "ctx catalog beats CatalogOrDefault",
+			cfg:  func(c *Config) { c.Catalog = "cfg_catalog" },
+			ctx: func(ctx context.Context) context.Context {
+				return context.WithValue(ctx, CatalogKey, "ctx_catalog")
+			},
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				assert.Equal(t, "ctx_catalog", aws.ToString(in.QueryExecutionContext.Catalog))
+			},
+		},
+		{
+			name: "catalog falls back to the package default",
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				assert.Equal(t, DefaultCatalog, aws.ToString(in.QueryExecutionContext.Catalog))
+			},
+		},
+		{
+			name: "ctx client request token is used verbatim",
+			ctx: func(ctx context.Context) context.Context {
+				return context.WithValue(ctx, ClientRequestTokenKey, "caller-supplied-idempotency-token")
+			},
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				assert.Equal(t, "caller-supplied-idempotency-token", aws.ToString(in.ClientRequestToken))
+			},
+		},
+		{
+			name: "a fresh token is generated when ctx has none",
+			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
+				tok := aws.ToString(in.ClientRequestToken)
+				assert.Len(t, tok, 36)
+				assert.True(t, IsQID(tok), "generated token should be a UUIDv4")
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestConnWithWG(func(cfg *Config, nm *mockAthenaClient) {
+				nm.GetWGStatus = true
+				if tc.cfg != nil {
+					tc.cfg(cfg)
+				}
+			})
+			nm := c.athenaClient.(*mockAthenaClient)
+			ctx := context.Background()
+			if tc.ctx != nil {
+				ctx = tc.ctx(ctx)
+			}
+
+			_, err := c.QueryContext(ctx, "select 1", nil)
+			assert.NoError(t, err)
+			in := nm.lastStartInput
+			// Fields that must hold on every single query.
+			assert.Equal(t, "default", aws.ToString(in.QueryExecutionContext.Database))
+			assert.Equal(t, "henry_wu", aws.ToString(in.WorkGroup))
+			assert.Equal(t, "s3://fake-query-results-arbitrary-bucket/",
+				aws.ToString(in.ResultConfiguration.OutputLocation))
+			tc.check(t, in)
+		})
+	}
+}
+
+// --- end-to-end through database/sql --------------------------------------
+
+// mockDBConnector hands database/sql a Connection wired to the mock client,
+// so a test can drive the real db.Query / db.QueryContext path without AWS.
+type mockDBConnector struct{ conn *Connection }
+
+func (m mockDBConnector) Connect(context.Context) (driver.Conn, error) { return m.conn, nil }
+func (m mockDBConnector) Driver() driver.Driver                        { return &SQLDriver{} }
+
+func newTestDB(mut ...func(*Config, *mockAthenaClient)) (*sql.DB, *mockAthenaClient) {
+	c := newTestConnWithWG(append([]func(*Config, *mockAthenaClient){
+		func(_ *Config, nm *mockAthenaClient) { nm.GetWGStatus = true },
+	}, mut...)...)
+	db := sql.OpenDB(mockDBConnector{c})
+	db.SetMaxOpenConns(1)
+	return db, c.athenaClient.(*mockAthenaClient)
+}
+
+// TestDB_SQLInjectionArgIsQuoted is the end-to-end injection guard: a hostile
+// string handed to db.Query must reach Athena as one inert, quote-escaped SQL
+// string literal in ExecutionParameters, never as raw executable text.
+func TestDB_SQLInjectionArgIsQuoted(t *testing.T) {
+	t.Parallel()
+	db, nm := newTestDB()
+	defer db.Close()
+
+	const payload = "x' OR 1=1 --"
+	rows, err := db.QueryContext(context.Background(), "select ?", payload)
+	assert.NoError(t, err)
+	defer rows.Close()
+
+	assert.Equal(t, "select ?", aws.ToString(nm.lastStartInput.QueryString),
+		"the payload must never be spliced into the query text")
+	assert.Equal(t, []string{"'x'' OR 1=1 --'"}, nm.lastStartInput.ExecutionParameters)
+	// The quoting is what makes it a value: the payload's own quote is
+	// doubled, so it cannot terminate the literal.
+	assert.NotContains(t, nm.lastStartInput.ExecutionParameters[0], "x' OR")
+}
+
+// TestDB_MaskedColumnIsCaseInsensitive pins the masking fix: Athena reports
+// unquoted identifiers lowercased, so a mask registered in any casing must
+// still apply to the column the service actually names.
+func TestDB_MaskedColumnIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	db, _ := newTestDB(func(cfg *Config, _ *mockAthenaClient) {
+		// Mock reports this column as "_col0"; register it shouting.
+		cfg.SetMaskedColumnValue("_COL0", "***masked***")
+	})
+	defer db.Close()
+
+	var got string
+	assert.NoError(t, db.QueryRow("select 1").Scan(&got))
+	assert.Equal(t, "***masked***", got)
+}
+
+// A mask registered via the DSN survives the same casing mismatch.
+func TestDSN_MaskedColumnIsCaseInsensitive(t *testing.T) {
+	t.Parallel()
+	cfg, err := NewConfig("s3://bucket/?region=us-east-1&masked_SSN=xxx")
+	assert.NoError(t, err)
+	v, ok := cfg.CheckColumnMasked("ssn")
+	assert.True(t, ok)
+	assert.Equal(t, "xxx", v)
 }

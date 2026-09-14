@@ -645,14 +645,22 @@ Parameterized queries allow for re-running the same query with different paramet
 against SQL injection attacks. This is especially useful if some of your parameter values are derived from user input.
 
 To use parameterized queries, use `?` as placeholders in the query you pass to `DB.Query()` or `DB.Exec()`.
-For each parameter, pass in arguments in the order they should replace `?`. For strings and byte slice arguments, use 
-`drv.FormatString()` and `drv.FormatBytes()` to escape special characters and format per Athena's requirements.
+For each parameter, pass in arguments in the order they should replace `?`. String and byte slice arguments are
+quoted and escaped automatically — do **not** pre-format them with `drv.FormatString()`/`drv.FormatBytes()`, that
+would quote them twice.
+
+If an argument must reach Athena as a SQL *expression* rather than a value (a typecast, a function call), wrap it in
+`drv.Raw` — which is unescaped, so never build one out of untrusted input:
+
+```go
+args := []any{drv.Raw("TIMESTAMP " + drv.FormatString("2024-07-01 00:00:00"))}
+```
 
 Example:
 
 ```go
 query := "SELECT request_timestamp, elb_name FROM sampledb.elb_logs WHERE url=? limit 1"
-args := []any{drv.FormatString("https://www.example.com/jobs/878")}
+args := []any{"https://www.example.com/jobs/878"}
 rows, err := db.Query(query, args)
 if err != nil {
     return

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -111,12 +112,7 @@ func executionParamsSupported(query string) bool {
 		// Only the CTAS form takes execution parameters; a bare AS
 		// token (reserved word, so never a column/table name) ahead of
 		// the SELECT body distinguishes it from plain CREATE TABLE DDL.
-		for _, f := range fields[1:] {
-			if f == "as" {
-				return true
-			}
-		}
-		return false
+		return slices.Contains(fields[1:], "as")
 	}
 	return false
 }
@@ -145,13 +141,11 @@ func newColumnInfo(colName string, colType any) athenatypes.ColumnInfo {
 }
 
 func newRow(colLen int, rData []string) athenatypes.Row {
-	var nData = make([]athenatypes.Datum, colLen)
+	ptrs := make([]*string, colLen)
 	for i := range colLen {
-		nData[i] = athenatypes.Datum{VarCharValue: &rData[i]}
+		ptrs[i] = &rData[i]
 	}
-	return athenatypes.Row{
-		Data: nData,
-	}
+	return genRow(ptrs)
 }
 
 func genRow(rowData []*string) athenatypes.Row {
@@ -185,75 +179,16 @@ func newHeaderlessResultPage(columnNames []string, columnTypes []string, rowsDat
 	}
 }
 
-// escapeBytesBackslash escapes []byte with backslashes (\)
-// This escapes the contents of a string (provided as []byte) by adding backslashes before special
-// characters, and turning others into specific escape sequences, such as
-// turning newlines into \n and null bytes into \0.
-//
-// \xNN notation to define a string constant holding some peculiar byte values.
-// (Of course, bytes range from hexadecimal values 00 through FF, inclusive.)
-func escapeBytesBackslash(buf, v []byte) []byte {
-	pos := len(buf)
-	buf = reserveBuffer(buf, len(v)*2)
-
-	for _, c := range v {
-		switch c {
-		case '\x00':
-			buf[pos] = '\\'
-			buf[pos+1] = '0'
-			pos += 2
-		case '\n':
-			buf[pos] = '\\'
-			buf[pos+1] = 'n'
-			pos += 2
-		case '\r':
-			buf[pos] = '\\'
-			buf[pos+1] = 'r'
-			pos += 2
-		case '\x1a':
-			buf[pos] = '\\'
-			buf[pos+1] = 'Z'
-			pos += 2
-		case '\'':
-			// Single quotes can be escaped by adding another single quote.
-			// https://docs.aws.amazon.com/athena/latest/ug/select.html
-			// https://docs.aws.amazon.com/athena/latest/ug/data-types.html#data-types-considerations
-			buf[pos] = '\''
-			buf[pos+1] = '\''
-			pos += 2
-		case '"':
-			buf[pos] = '\\'
-			buf[pos+1] = '"'
-			pos += 2
-		case '\\':
-			buf[pos] = '\\'
-			buf[pos+1] = '\\'
-			pos += 2
-		default:
-			buf[pos] = c
-			pos++
-		}
-	}
-
-	return buf[:pos]
-}
-
-// escapeStringBackslash is similar to escapeBytesBackslash but for string.
-func escapeStringBackslash(buf []byte, v string) []byte {
-	return escapeBytesBackslash(buf, []byte(v))
-}
-
-// reserveBuffer checks cap(buf) and expand buffer to len(buf) + appendSize.
-// If cap(buf) is not enough, reallocate new buffer.
-func reserveBuffer(buf []byte, appendSize int) []byte {
-	newSize := len(buf) + appendSize
-	if cap(buf) < newSize {
-		// Grow buffer exponentially
-		newBuf := make([]byte, len(buf)*2+appendSize)
-		copy(newBuf, buf)
-		buf = newBuf
-	}
-	return buf[:newSize]
+// escapeQuotes escapes v for use inside an Athena/Trino single-quoted string
+// literal. Doubling an embedded single quote is the ONLY correct transform:
+// Trino does not interpret backslash escapes inside string literals, so the
+// MySQL-style \n / \0 / \\ / \" / \r / \Z escapes this used to apply corrupted
+// the value instead of protecting it (a literal backslash or newline round
+// tripped wrong). Every other byte — NUL included — is carried through as is;
+// the value never leaves a quoted context.
+// https://docs.aws.amazon.com/athena/latest/ug/select.html
+func escapeQuotes(v string) string {
+	return strings.ReplaceAll(v, "'", "''")
 }
 
 func namedValueToValue(named []driver.NamedValue) []driver.Value {
@@ -341,26 +276,26 @@ func IsQID(q string) bool {
 	return qIDPattern.MatchString(q)
 }
 
-// FormatString formats a string type query argument for Athena by escaping special characters and surrounding the
-// string with single quotes. Using FormatString allows for selective formatting of the query argument, if
-// typecasting or function calls are part of the query argument.
+// Raw is a query argument that reaches Athena verbatim: it is NOT quoted or
+// escaped by the driver. Use it — and only it — when the argument has to be a
+// SQL expression rather than a value, such as a typecast literal:
 //
-// Example usage:
-// query := "SELECT * FROM my_table WHERE description = ? AND created > ?"
+//	db.Query("SELECT * FROM t WHERE created > ?",
+//		athenadriver.Raw("TIMESTAMP "+athenadriver.FormatString("2024-07-01 00:00:00")))
 //
-//	args := []any{
-//		 aws.String(athenadriver.FormatString("The bunny's eating a carrot")),
-//		 aws.String(fmt.Sprintf("TIMESTAMP %s", athenadriver.FormatString("2024-07-01 00:00:00")))
-//	}
+// Plain string / []byte arguments are quoted and escaped automatically, so
+// anything derived from untrusted input must NOT be wrapped in Raw.
+type Raw string
+
+// FormatString quotes and escapes a string as an Athena string literal. Plain
+// string arguments are formatted this way automatically; FormatString is for
+// building a Raw expression that embeds a literal (see Raw).
 func FormatString(v string) string {
-	return fmt.Sprintf("'%s'", escapeBytesBackslash([]byte{}, []byte(v)))
+	return "'" + escapeQuotes(v) + "'"
 }
 
-// FormatBytes formats a byte slice query argument for Athena by escaping special characters and surrounding it with
-// single quotes.
+// FormatBytes quotes and escapes a byte slice as an Athena string literal.
+// Plain []byte arguments are formatted this way automatically.
 func FormatBytes(v []byte) []byte {
-	buf := append([]byte{}, "_binary'"...)
-	buf = escapeBytesBackslash(buf, v)
-	buf = append(buf, '\'')
-	return buf
+	return []byte(FormatString(string(v)))
 }

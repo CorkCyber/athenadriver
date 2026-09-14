@@ -7,13 +7,25 @@ import (
 	"fmt"
 	"math"
 	"strconv"
-	"strings"
 	"time"
 )
 
 // timestampFormatDriverMicro is the string format we transform Go time.Time objects into. This is not meant for
 // TIMESTAMP columns, as Athena timestamp columns only have a millisecond granularity.
 const timestampFormatDriverMicro = "2006-01-02 15:04:05.000000"
+
+// CheckNamedValue lets Raw arguments reach the driver unconverted;
+// database/sql's default converter would otherwise flatten Raw to a plain
+// string (Kind == String) and the value would get quoted like any other
+// string. Everything else falls back to the default conversion.
+func (c *Connection) CheckNamedValue(nv *driver.NamedValue) error {
+	if _, ok := nv.Value.(Raw); ok {
+		return nil
+	}
+	return driver.ErrSkip
+}
+
+var _ driver.NamedValueChecker = (*Connection)(nil)
 
 // buildExecutionParams converts Go data types into strings for query arguments in parameterized queries.
 // Returns nil for empty args so the resulting StartQueryExecution call leaves
@@ -69,17 +81,17 @@ func (c *Connection) buildExecutionParams(args []driver.Value) ([]string, error)
 				val = fmt.Sprintf("'%s'", v.Format(dateFormat))
 			}
 		case []byte:
-			// Note: Different from interpolateParams() behavior.
-			// Like the string case below, enclosing in single quotes would prevent typecasting or function calls in
-			// execution parameters. Prior to passing in query arguments, Format* functions in utils.go can be used.
-			val = string(v)
+			val = string(FormatBytes(v))
 		case string:
-			// Note: Different from interpolateParams() behavior.
-			// For parameterized queries, typecasting or function calls go in the execution parameters. For example,
-			// `WHERE created = TIMESTAMP '2024-07-01 00:00:00'` should be formatted as: `WHERE created = ?` (query) and
-			// `TIMESTAMP '2024-07-01 00:00:00.000'` (arg). Therefore, we cannot simply enclose the full string with
-			// single quotes here. Users should use the Format* functions in utils.go to format input string arguments.
-			val = v
+			// Athena evaluates each ExecutionParameters entry as a SQL
+			// EXPRESSION, not as an opaque bound value, so an unquoted
+			// string argument is executable SQL — quoting is what makes
+			// `1 OR 1=1` a value instead of a predicate. A caller that
+			// genuinely needs an expression (typecast, function call)
+			// must opt out explicitly with the Raw type.
+			val = FormatString(v)
+		case Raw:
+			val = string(v)
 		default:
 			return []string{}, ErrQueryUnknownType
 		}
@@ -88,9 +100,33 @@ func (c *Connection) buildExecutionParams(args []driver.Value) ([]string, error)
 	return executionParams, nil
 }
 
+// placeholderIndexes returns the byte offset of every `?` in query that sits
+// OUTSIDE a single-quoted string literal. A `?` inside a literal (e.g.
+// `WHERE note = 'imported?'`) is data, not a placeholder: substituting it
+// would inject the argument's own quotes into the middle of a literal and
+// flip quoting parity for the rest of the statement. Trino escapes a quote
+// inside a literal by doubling it, which the plain toggle handles: the second
+// quote of the pair re-enters the literal.
+func placeholderIndexes(query string) []int {
+	var idx []int
+	inLiteral := false
+	for i := 0; i < len(query); i++ {
+		switch query[i] {
+		case '\'':
+			inLiteral = !inLiteral
+		case '?':
+			if !inLiteral {
+				idx = append(idx, i)
+			}
+		}
+	}
+	return idx
+}
+
 func (c *Connection) interpolateParams(query string, args []driver.Value) (string, error) {
-	// Number of ? should be same to len(args)
-	if strings.Count(query, "?") != len(args) {
+	// Number of real (unquoted) ? should be same to len(args)
+	placeholders := placeholderIndexes(query)
+	if len(placeholders) != len(args) {
 		return "", ErrInvalidQuery
 	}
 
@@ -98,19 +134,13 @@ func (c *Connection) interpolateParams(query string, args []driver.Value) (strin
 	// argument. Previous fixed 256 KiB pre-alloc was garbage on every
 	// parameterized query, regardless of query length.
 	queryBuffer := make([]byte, 0, len(query)+64*len(args))
-	argPos := 0
+	prev := 0
 
-	for i := 0; i < len(query); i++ {
-		q := strings.IndexByte(query[i:], '?')
-		if q == -1 {
-			queryBuffer = append(queryBuffer, query[i:]...)
-			break
-		}
-		queryBuffer = append(queryBuffer, query[i:i+q]...)
-		i += q
+	for argPos, p := range placeholders {
+		queryBuffer = append(queryBuffer, query[prev:p]...)
+		prev = p + 1
 
 		arg := args[argPos]
-		argPos++
 
 		if arg == nil {
 			queryBuffer = append(queryBuffer, "NULL"...)
@@ -141,13 +171,11 @@ func (c *Connection) interpolateParams(query string, args []driver.Value) (strin
 				queryBuffer = v.AppendFormat(queryBuffer, layout)
 			}
 		case []byte:
-			queryBuffer = append(queryBuffer, "_binary'"...)
-			queryBuffer = escapeBytesBackslash(queryBuffer, v)
-			queryBuffer = append(queryBuffer, '\'')
+			queryBuffer = append(queryBuffer, FormatBytes(v)...)
 		case string:
-			queryBuffer = append(queryBuffer, '\'')
-			queryBuffer = escapeStringBackslash(queryBuffer, v)
-			queryBuffer = append(queryBuffer, '\'')
+			queryBuffer = append(queryBuffer, FormatString(v)...)
+		case Raw:
+			queryBuffer = append(queryBuffer, v...)
 		default:
 			return "", ErrQueryUnknownType
 		}
@@ -156,5 +184,6 @@ func (c *Connection) interpolateParams(query string, args []driver.Value) (strin
 			return "", ErrQueryBufferOF
 		}
 	}
+	queryBuffer = append(queryBuffer, query[prev:]...)
 	return string(queryBuffer), nil
 }

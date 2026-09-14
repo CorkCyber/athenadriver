@@ -2,12 +2,18 @@ package configfx
 
 import (
 	"context"
+	_ "embed"
 	"flag"
 	"fmt"
-	"io"
-	"net/http"
 	"os"
 )
+
+// defaultConfig is the athenareader.config shipped in this repository. It is
+// baked into the binary at build time so a first run never has to fetch
+// configuration (bucket, region, admin/read-only flag) over the network.
+//
+//go:embed athenareader.config
+var defaultConfig []byte
 
 func setUpFlagUsage(context.Context) error {
 	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
@@ -35,33 +41,29 @@ func setUpFlagUsage(context.Context) error {
 			"\t\n" +
 			"AUTHORS\n\tCreated by Henry Fuheng Wu at Uber Technologies. Maintained by Cork Cyber.\n\n" +
 			"REPORTING BUGS\n\thttps://github.com/CorkCyber/athenadriver/issues\n"
-		fmt.Fprintf(commandLine.Output(), preBody)
+		fmt.Fprint(commandLine.Output(), preBody)
 		fmt.Fprintf(commandLine.Output(),
 			"SYNOPSIS\n\n\t%s [-v] [-b OUTPUT_BUCKET] [-d DATABASE_NAME] [-q QUERY_STRING_OR_FILE] [-r] [-a] [-m] [-y STYLE_NAME] [-o OUTPUT_FORMAT]\n\nDESCRIPTION\n\n", os.Args[0])
 		flag.PrintDefaults()
-		fmt.Fprintf(commandLine.Output(), desc)
+		fmt.Fprint(commandLine.Output(), desc)
 	}
 	return nil
 }
 
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
+// resolveConfigFile returns the path of the athenareader.config to use,
+// looking in $HOME then the working directory. If neither exists, the
+// embedded default is written to $HOME and used. No network access.
+func resolveConfigFile() (string, error) {
+	home := homeDir() + "/athenareader.config"
+	for _, p := range []string{home, "athenareader.config"} {
+		if _, err := os.Stat(p); err == nil {
+			return p, nil
+		}
 	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
+	if err := os.WriteFile(home, defaultConfig, 0o600); err != nil {
+		return "", fmt.Errorf("no athenareader.config found and could not write default to %s: %w", home, err)
 	}
-	defer out.Close()
-
-	_, err = io.Copy(out, in)
-	if err != nil {
-		return err
-	}
-	return out.Close()
+	return home, nil
 }
 
 func homeDir() string {
@@ -69,31 +71,6 @@ func homeDir() string {
 		return h
 	}
 	return os.Getenv("USERPROFILE") // windows
-}
-
-func downloadFile(filepath string, url string) (err error) {
-	// Create the file
-	out, err := os.Create(filepath)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-	// Get the data
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	// Check server response
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("bad status: %s", resp.Status)
-	}
-	// Writer the body to file
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 func isFlagPassed(name string) bool {

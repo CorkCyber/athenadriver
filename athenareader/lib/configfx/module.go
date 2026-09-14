@@ -117,38 +117,11 @@ func new(p Params) (Result, error) {
 		return Result{}, fmt.Errorf("no")
 	}
 
-	// How to install a config file from a library
-	if _, err = os.Stat(homeDir() + "/athenareader.config"); err == nil {
-		provider, err = config.NewYAML(config.File(homeDir() + "/athenareader.config"))
-	} else if _, err = os.Stat("athenareader.config"); err == nil {
-		provider, err = config.NewYAML(config.File("athenareader.config"))
-	} else {
-		goPath := os.Getenv("GOPATH")
-		if goPath == "" {
-			goPath = homeDir() + "/go"
-			if _, err = os.Stat(goPath); err != nil {
-				d, _ := os.Getwd()
-				println("could not find athenareader.config in home directory or current directory " + d)
-				os.Exit(1)
-			}
-		}
-		path := goPath + "/src/github.com/CorkCyber/athenadriver/athenareader/athenareader.config"
-		if _, err = os.Stat(path); err == nil {
-			copyFile(path, homeDir()+"/athenareader.config")
-			provider, err = config.NewYAML(config.File(path))
-		} else {
-			err = downloadFile(homeDir()+"/athenareader.config",
-				"https://raw.githubusercontent.com/uber/athenadriver/master/athenareader/athenareader.config")
-			if err != nil {
-				d, _ := os.Getwd()
-				println("could not find athenareader.config in home directory or current directory " + d)
-				os.Exit(1)
-			} else {
-				provider, err = config.NewYAML(config.File(homeDir() + "/athenareader.config"))
-			}
-		}
+	cfgPath, err := resolveConfigFile()
+	if err != nil {
+		return Result{}, err
 	}
-
+	provider, err = config.NewYAML(config.File(cfgPath))
 	if err != nil {
 		return Result{}, err
 	}

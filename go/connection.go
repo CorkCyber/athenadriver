@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
@@ -26,6 +27,11 @@ type Connection struct {
 	// tracer is owned per-connection so concurrent Connect() calls do not
 	// race by mutating a shared tracer on the connector.
 	tracer *DriverTracer
+	// closed marks the conn unusable after Close(). Close leaves
+	// athenaClient/connector intact: an in-flight poll dereferences them
+	// without synchronization, so nil-ing them is a data race and a panic
+	// window. Athena has no server-side session to release anyway.
+	closed atomic.Bool
 }
 
 // ExecContext executes a query that doesn't return rows, such as an INSERT or UPDATE.
@@ -35,7 +41,7 @@ type Connection struct {
 // first page of results, so the extra GetQueryResults round-trip that
 // NewRows makes is unavoidable for DML.
 func (c *Connection) ExecContext(ctx context.Context, query string, namedArgs []driver.NamedValue) (driver.Result, error) {
-	if c.athenaClient == nil {
+	if c.closed.Load() || c.athenaClient == nil {
 		return nil, driver.ErrBadConn
 	}
 	if len(namedArgs) > 0 {
@@ -91,7 +97,7 @@ func (c *Connection) getHeaderlessSingleRowResultPage(ctx context.Context, qid s
 // With QueryContext implemented, we don't need Queryer.
 // QueryerContext must honor the context timeout and return when the context is canceled.
 func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs []driver.NamedValue) (driver.Rows, error) {
-	if c.athenaClient == nil {
+	if c.closed.Load() || c.athenaClient == nil {
 		return nil, driver.ErrBadConn
 	}
 	var obs = c.tracer
@@ -330,11 +336,11 @@ func (c *Connection) resolveWorkgroup(ctx context.Context) (Workgroup, error) {
 		return wg, nil
 	}
 	if athenaWG.State != athenatypes.WorkGroupStateEnabled {
-		obs.Log(WarnLevel, "workgroup "+DefaultWGName+" is disabled.")
+		obs.Log(WarnLevel, "workgroup "+wg.Name+" is disabled.")
 		obs.Scope().Counter(DriverName + ".failure.querycontext.wgdisabled").Inc(1)
 		return wg, fmt.Errorf("workgroup %q is disabled", wg.Name)
 	}
-	obs.Log(DebugLevel, "workgroup "+DefaultWGName+" is enabled.")
+	obs.Log(DebugLevel, "workgroup "+wg.Name+" is enabled.")
 	c.connector.wgVerified.Store(true)
 	return wg, nil
 }
@@ -386,8 +392,7 @@ func (c *Connection) Begin() (driver.Tx, error) {
 // idle connections, it shouldn't be necessary for drivers to
 // do their own connection caching.
 func (c *Connection) Close() error {
-	c.connector = nil
-	c.athenaClient = nil
+	c.closed.Store(true)
 	return nil
 }
 
@@ -408,7 +413,7 @@ func (c *Connection) ResetSession(ctx context.Context) error {
 // the connection rather than return it to the pool. We treat a Connection
 // whose Close() has already run as invalid.
 func (c *Connection) IsValid() bool {
-	return c.athenaClient != nil
+	return !c.closed.Load() && c.athenaClient != nil
 }
 
 var _ driver.QueryerContext = (*Connection)(nil)

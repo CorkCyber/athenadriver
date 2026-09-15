@@ -931,7 +931,7 @@ func TestResolveWorkgroup_NonNotFoundErrorIsSurfaced(t *testing.T) {
 			assert.ErrorIs(t, err, tc.err, "the AWS error must be surfaced verbatim")
 			assert.Zero(t, nm.callCount("CreateWorkGroup"),
 				"a non-not-found error must never be read as 'absent, go create it'")
-			assert.False(t, c.connector.wgVerified.Load())
+			assert.False(t, c.connector.wgOnce.done())
 		})
 	}
 }
@@ -959,7 +959,7 @@ func TestResolveWorkgroup_ConcurrentCreationRecovery(t *testing.T) {
 	wg, err := c.resolveWorkgroup(context.Background())
 	assert.NoError(t, err)
 	assert.Equal(t, "henry_wu", wg.Name)
-	assert.True(t, c.connector.wgVerified.Load())
+	assert.True(t, c.connector.wgOnce.done())
 	assert.Equal(t, 2, nm.callCount("GetWorkGroup"), "the miss must be re-checked")
 	assert.Equal(t, 1, nm.callCount("CreateWorkGroup"))
 }
@@ -991,8 +991,8 @@ func TestResolveWorkgroup_ConcurrentHammer(t *testing.T) {
 	}
 
 	hammer()
-	assert.True(t, c.connector.wgVerified.Load())
-	// Cold start is single-flighted under wgMu: one GetWorkGroup and one
+	assert.True(t, c.connector.wgOnce.done())
+	// Cold start is single-flighted under wgOnce: one GetWorkGroup and one
 	// CreateWorkGroup total, no matter how many callers race.
 	assert.Equal(t, 1, nm.callCount("GetWorkGroup"))
 	assert.Equal(t, 1, nm.callCount("CreateWorkGroup"))
@@ -1295,7 +1295,7 @@ func TestResolveWorkgroup_ConcurrentQueryContext(t *testing.T) {
 	}
 	wg.Wait()
 
-	assert.True(t, seed.connector.wgVerified.Load())
+	assert.True(t, seed.connector.wgOnce.done())
 	assert.Equal(t, 1, nm.callCount("GetWorkGroup"))
 	assert.Equal(t, 1, nm.callCount("CreateWorkGroup"))
 	assert.Equal(t, n, nm.callCount("StartQueryExecution"))

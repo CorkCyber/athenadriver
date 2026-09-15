@@ -29,27 +29,59 @@ type SQLConnector struct {
 	// individually. nil means "fall back to DSN-driven resolution".
 	awsConfig *aws.Config
 
-	// clientMu/client cache the resolved aws.Config and Athena client
-	// across every pooled connection this connector hands out. athena.Client
-	// and aws.CredentialsCache are both safe for concurrent use, so one
-	// client per connector means one credential refresh timer and one
+	// clientOnce caches the resolved aws.Config and Athena client across
+	// every pooled connection this connector hands out. athena.Client and
+	// aws.CredentialsCache are both safe for concurrent use, so one client
+	// per connector means one credential refresh timer and one
 	// http.Transport (keep-alive/TLS session reuse) for the whole pool
-	// instead of N of each. Only success is cached — a transient failure
-	// (network blip, IMDS not ready yet) on the first Connect must not
-	// poison every later Connect for the connector's lifetime.
-	clientMu sync.Mutex
-	client   atomic.Pointer[athena.Client]
+	// instead of N of each.
+	clientOnce retryOnce[*athena.Client]
 
-	// wgMu/wgVerified record that the configured workgroup has been
-	// confirmed to exist and be enabled (or was remote-created). The
-	// workgroup is fixed at construction, so only the first query pays for
-	// GetWorkGroup — wgMu single-flights the check under the same
-	// double-checked lock as clientMu/client, so a cold-start burst of N
-	// pooled connections costs one GetWorkGroup instead of N against
-	// Athena's low API quota. Only success is cached — a transient failure
-	// must not poison the connector for its whole lifetime.
-	wgMu       sync.Mutex
-	wgVerified atomic.Bool
+	// wgOnce records that the configured workgroup has been confirmed to
+	// exist and be enabled (or was remote-created). The workgroup is fixed
+	// at construction, so only the first query pays for GetWorkGroup — this
+	// single-flights the check so a cold-start burst of N pooled
+	// connections costs one GetWorkGroup instead of N against Athena's low
+	// API quota.
+	wgOnce retryOnce[struct{}]
+}
+
+// retryOnce lazily computes and shares a value the first time it's needed,
+// across every caller — but only caches success. A transient failure (a
+// network blip, IMDS not ready yet) is left for the next caller to retry
+// instead of poisoning the cache for the connector's whole lifetime.
+// sync.OnceValue doesn't fit: it caches a failed attempt just as
+// permanently as a successful one.
+type retryOnce[T any] struct {
+	mu    sync.Mutex
+	value atomic.Pointer[T]
+}
+
+// do returns the cached value if one exists; otherwise it calls fn under a
+// lock (re-checking the cache first, in case another caller just filled it
+// while this one was waiting) and caches the result only on success.
+func (o *retryOnce[T]) do(fn func() (T, error)) (T, error) {
+	if v := o.value.Load(); v != nil {
+		return *v, nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if v := o.value.Load(); v != nil {
+		return *v, nil
+	}
+	v, err := fn()
+	if err != nil {
+		var zero T
+		return zero, err
+	}
+	o.value.Store(&v)
+	return v, nil
+}
+
+// done reports whether a value has been successfully cached. Test-only
+// introspection; production code should call do instead.
+func (o *retryOnce[T]) done() bool {
+	return o.value.Load() != nil
 }
 
 // NewConnector returns a SQLConnector for the given DSN-parsed Config.
@@ -130,26 +162,15 @@ func (c *SQLConnector) resolveAWSConfig(ctx context.Context) (aws.Config, error)
 
 // sharedClient resolves the aws.Config and builds the Athena client once,
 // then hands the same *athena.Client to every connection. athena.Client is
-// goroutine-safe and designed to be constructed once and shared. A failed
-// resolution is retried on the next call rather than cached, since a
-// transient credential/network failure must not permanently break every
-// future connection on this connector.
+// goroutine-safe and designed to be constructed once and shared.
 func (c *SQLConnector) sharedClient(ctx context.Context) (*athena.Client, error) {
-	if client := c.client.Load(); client != nil {
-		return client, nil
-	}
-	c.clientMu.Lock()
-	defer c.clientMu.Unlock()
-	if client := c.client.Load(); client != nil {
-		return client, nil
-	}
-	awsCfg, err := c.resolveAWSConfig(ctx)
-	if err != nil {
-		return nil, err
-	}
-	client := athena.NewFromConfig(awsCfg)
-	c.client.Store(client)
-	return client, nil
+	return c.clientOnce.do(func() (*athena.Client, error) {
+		awsCfg, err := c.resolveAWSConfig(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return athena.NewFromConfig(awsCfg), nil
+	})
 }
 
 // NoopsSQLConnector is to create a noops SQLConnector.

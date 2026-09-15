@@ -3,7 +3,6 @@
 package configfx
 
 import (
-	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -64,7 +63,7 @@ type fileConfig struct {
 }
 
 func init() {
-	setUpFlagUsage(context.Background())
+	setUpFlagUsage()
 }
 
 // loadConfigFile parses an athenareader.config YAML file. A missing or

@@ -1,7 +1,6 @@
 package configfx
 
 import (
-	"context"
 	_ "embed"
 	"flag"
 	"fmt"
@@ -15,7 +14,7 @@ import (
 //go:embed athenareader.config
 var defaultConfig []byte
 
-func setUpFlagUsage(context.Context) error {
+func setUpFlagUsage() {
 	var commandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	flag.Usage = func() {
 		preBody := "NAME\n\tathenareader - read athena data from command line\n\n"
@@ -46,7 +45,6 @@ func setUpFlagUsage(context.Context) error {
 		flag.PrintDefaults()
 		fmt.Fprint(commandLine.Output(), desc)
 	}
-	return nil
 }
 
 // resolveConfigFile returns the path of the athenareader.config to use,

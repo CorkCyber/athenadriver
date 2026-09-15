@@ -19,11 +19,11 @@ func main() {
 	// 1. Set AWS Credential in Driver Config.
 	conf, err := drv.NewDefaultConfig(secret.OutputBucket, secret.Region,
 		secret.AccessID, secret.SecretAccessKey)
-	conf.LoggingEnabled = true
 	if err != nil {
 		log.Fatal(err)
 		return
 	}
+	conf.LoggingEnabled = true
 
 	// 2. Open Connection.
 	dsn := conf.Stringify()
@@ -44,6 +44,6 @@ func main() {
 
 /*
 Sample Output:
-{"level":"warn","ts":1579990455.5467792,"caller":"go/observability.go:73","msg":"query canceled","resp.QueryExecutionId":"34e08219-ca2e-4e10-94b3-0ebf6c4c22f6"}
-2020/01/25 14:14:15 context deadline exceeded
+{"time":"2026-06-15T13:44:26Z","level":"WARN","msg":"query canceled","queryID":"34e08219-ca2e-4e10-94b3-0ebf6c4c22f6"}
+2026/06/15 13:44:26 context deadline exceeded
 */

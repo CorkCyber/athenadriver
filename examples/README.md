@@ -1,6 +1,6 @@
 # athenadriver examples
 
-Sample code for `github.com/CorkCyber/athenadriver/go`. Each example
+Sample code for `github.com/CorkCyber/athenadriver/v2/go`. Each example
 lives in its own subdirectory and builds as a standalone `main`.
 
 This directory is its own Go module

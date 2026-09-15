@@ -7,17 +7,16 @@ import (
 	"database/sql"
 	"log"
 
+	secret "github.com/CorkCyber/athenadriver/examples/constants"
 	drv "github.com/CorkCyber/athenadriver/v2/go"
-)
-
-var (
-	ctx context.Context
-	db  *sql.DB
 )
 
 func main() {
 	// 1. Set AWS Credential in Driver Config.
 	conf := drv.NewNoOpsConfig()
+	if err := conf.SetOutputBucket(secret.OutputBucketDev); err != nil {
+		log.Fatal(err)
+	}
 
 	// 2. Open Connection.
 	dsn := conf.Stringify()

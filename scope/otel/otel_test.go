@@ -4,6 +4,7 @@ package otel
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"testing"
@@ -11,8 +12,13 @@ import (
 
 	drv "github.com/CorkCyber/athenadriver/v2/go"
 	"go.opentelemetry.io/otel"
+	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/sdk/trace/tracetest"
+
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+	"go.opentelemetry.io/otel/trace"
 )
 
 func TestAdapterSatisfiesScope(t *testing.T) {
@@ -21,7 +27,7 @@ func TestAdapterSatisfiesScope(t *testing.T) {
 
 // TestAdapterLiveFire wires the adapter to a ManualReader-backed
 // MeterProvider and asserts the emitted counter + histogram show up with
-// the values we recorded — end-to-end proof the Int64Counter /
+// the values we recorded: end-to-end proof the Int64Counter and
 // Float64Histogram plumbing actually reaches otel's collector layer.
 func TestAdapterLiveFire(t *testing.T) {
 	reader := metric.NewManualReader()
@@ -101,7 +107,7 @@ func TestAdapterCacheHit(t *testing.T) {
 
 // TestAdapterConcurrentLookup exercises the RWMutex-guarded
 // counter/timer cache under `-race`. Many goroutines racing on the same
-// and on different names — must never deadlock or corrupt the map, and
+// and on different names must never deadlock or corrupt the map, and
 // every goroutine must see the same wrapper for a given name.
 func TestAdapterConcurrentLookup(t *testing.T) {
 	reader := metric.NewManualReader()
@@ -161,4 +167,115 @@ func TestAdapterNilMeter(t *testing.T) {
 	}
 	s.Counter("k").Inc(1) // must not panic
 	s.Timer("t").Record(time.Millisecond)
+}
+
+// TestNewTracer_NilTracer pins the nil-input contract: NewTracer(nil)
+// degrades to the driver's NoopTracer instead of panicking on first use.
+func TestNewTracer_NilTracer(t *testing.T) {
+	tr := NewTracer(nil)
+	if tr != drv.NoopTracer {
+		t.Fatalf("NewTracer(nil) = %T, want drv.NoopTracer", tr)
+	}
+	_, span := tr.StartSpan(context.Background(), "athena.query") // must not panic
+	span.SetAttr("k", "v")
+	span.End()
+}
+
+// TestTracer_SpanIsClientKindWithAttributes is the end-to-end proof that
+// matters for ingestion: the span this adapter produces is CLIENT-kind
+// (required by OpenTelemetry's database semantic conventions for a
+// backend like Sentry/Datadog to render it as a DB call) and carries every
+// attribute type the driver sets.
+func TestTracer_SpanIsClientKindWithAttributes(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	defer provider.Shutdown(context.Background())
+
+	tr := NewTracer(provider.Tracer("athenadriver.test"))
+	_, span := tr.StartSpan(context.Background(), "athena.query")
+	span.SetAttr("db.system.name", "aws.athena")
+	span.SetAttr("athena.data_scanned_bytes", int64(1024))
+	span.SetAttr("bool.attr", true)
+	span.SetAttr("float.attr", 1.5)
+	span.End()
+
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	got := spans[0]
+	if got.Name != "athena.query" {
+		t.Errorf("span name = %q, want %q", got.Name, "athena.query")
+	}
+	if got.SpanKind != trace.SpanKindClient {
+		t.Errorf("span kind = %v, want %v (required for DB-span ingestion)", got.SpanKind, trace.SpanKindClient)
+	}
+	attrs := map[string]any{}
+	for _, kv := range got.Attributes {
+		attrs[string(kv.Key)] = kv.Value.AsInterface()
+	}
+	if attrs["db.system.name"] != "aws.athena" {
+		t.Errorf("db.system.name = %v, want aws.athena", attrs["db.system.name"])
+	}
+	if attrs["athena.data_scanned_bytes"] != int64(1024) {
+		t.Errorf("athena.data_scanned_bytes = %v, want 1024", attrs["athena.data_scanned_bytes"])
+	}
+	if attrs["bool.attr"] != true {
+		t.Errorf("bool.attr = %v, want true", attrs["bool.attr"])
+	}
+	if attrs["float.attr"] != 1.5 {
+		t.Errorf("float.attr = %v, want 1.5", attrs["float.attr"])
+	}
+}
+
+// TestTracer_RecordErrorSetsSpanStatus proves a recorded error attaches
+// an exception event and flips the span status to Error: a span left at
+// its default Unset status reads as "succeeded" to most backends
+// regardless of any error event on it.
+func TestTracer_RecordErrorSetsSpanStatus(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	defer provider.Shutdown(context.Background())
+
+	tr := NewTracer(provider.Tracer("athenadriver.test"))
+	_, span := tr.StartSpan(context.Background(), "athena.query")
+	span.RecordError(errors.New("workgroup is disabled"))
+	span.End()
+
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	got := spans[0]
+	if got.Status.Code != codes.Error {
+		t.Errorf("span status = %v, want codes.Error", got.Status.Code)
+	}
+	if len(got.Events) != 1 || got.Events[0].Name != "exception" {
+		t.Errorf("events = %+v, want one exception event", got.Events)
+	}
+}
+
+// TestTracer_RecordErrorNilIsNoop pins the nil guard: a nil error must not
+// attach an exception event or flip the span status to Error.
+func TestTracer_RecordErrorNilIsNoop(t *testing.T) {
+	exporter := tracetest.NewInMemoryExporter()
+	provider := sdktrace.NewTracerProvider(sdktrace.WithSyncer(exporter))
+	defer provider.Shutdown(context.Background())
+
+	tr := NewTracer(provider.Tracer("athenadriver.test"))
+	_, span := tr.StartSpan(context.Background(), "athena.query")
+	span.RecordError(nil)
+	span.End()
+
+	spans := exporter.GetSpans()
+	if len(spans) != 1 {
+		t.Fatalf("got %d spans, want 1", len(spans))
+	}
+	got := spans[0]
+	if got.Status.Code == codes.Error {
+		t.Errorf("span status = %v, want not codes.Error", got.Status.Code)
+	}
+	if len(got.Events) != 0 {
+		t.Errorf("events = %+v, want none", got.Events)
+	}
 }

@@ -61,6 +61,10 @@ Full migration steps live in the [README v2 migration guide](README.md#v200-migr
 **Poll tuning**
 - `Config.ResultPollBackoffMultiplier` / `Config.ResultPollMaxInterval`.
 
+**Tracing**
+- `Tracer`/`Span` interfaces + `TracerKey` ctx value, mirroring `Scope`'s metrics design. One span per `QueryContext`/`ExecContext` call, tagged CLIENT-kind with OpenTelemetry's database semantic-convention attributes (`db.system.name`, `db.namespace`, `db.operation.name`) plus `athena.query_id`/`workgroup`/`catalog`/`statement_type`/`data_scanned_bytes`, so a backend that understands those conventions (Sentry, Datadog APM, Honeycomb, Tempo, ...) renders it as a database call. `Config.TracingEnabled` (default true, DSN key `TracingEnabled`).
+- `github.com/CorkCyber/athenadriver/scope/otel`'s `NewTracer(trace.Tracer)` bridges the above to OpenTelemetry, alongside its existing metrics adapter.
+
 ### Fixed
 
 **Correctness / contract**

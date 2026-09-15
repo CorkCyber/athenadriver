@@ -77,7 +77,7 @@ func TestQueryContext_StructuredFailure(t *testing.T) {
 		cfg.WorkGroup = nil
 	})
 	_, err := c.QueryContext(context.Background(),
-		"SELECTQueryContext_AWS_FAIL_STRUCTURED", []driver.NamedValue{})
+		"SELECTQueryContext_AWS_FAIL_STRUCTURED x", []driver.NamedValue{})
 	assert.NotNil(t, err)
 
 	var qErr *QueryFailureError

@@ -89,11 +89,10 @@ func isReadOnlyStatement(query string) bool {
 }
 
 // executionParamsSupported reports whether Athena's StartQueryExecution
-// accepts `?` placeholders via ExecutionParameters for this statement.
-// Athena supports execution parameters only for SELECT, INSERT INTO,
-// CTAS (CREATE TABLE ... AS SELECT), UNLOAD and WITH statements;
-// parameterized DDL (ALTER, DROP, MSCK, plain CREATE, ...) is rejected
-// server-side and must be interpolated client-side before submission.
+// accepts `?` placeholders via ExecutionParameters for this statement:
+// only SELECT, INSERT INTO, CTAS (CREATE TABLE ... AS SELECT), UNLOAD and
+// WITH. Parameterized DDL (ALTER, DROP, MSCK, plain CREATE, ...) is
+// rejected server-side and must be interpolated client-side first.
 func executionParamsSupported(query string) bool {
 	fields := strings.Fields(strings.ToLower(query))
 	if len(fields) == 0 {
@@ -111,6 +110,36 @@ func executionParamsSupported(query string) bool {
 			slices.Contains(fields[2:], "as")
 	}
 	return false
+}
+
+// athenaStatementVerbs bounds sqlOperationName's output to Athena's real
+// statement types. Anything not in this set returns "" instead.
+var athenaStatementVerbs = map[string]bool{
+	"SELECT": true, "WITH": true, "INSERT": true, "UPDATE": true,
+	"DELETE": true, "MERGE": true, "CREATE": true, "ALTER": true,
+	"DROP": true, "TRUNCATE": true, "GRANT": true, "REVOKE": true,
+	"DESCRIBE": true, "DESC": true, "SHOW": true, "EXPLAIN": true,
+	"USE": true, "UNLOAD": true, "VALUES": true, "MSCK": true,
+	"VACUUM": true, "OPTIMIZE": true, "ANALYZE": true, "PREPARE": true,
+	"EXECUTE": true, "DEALLOCATE": true, "START": true, "COMMIT": true,
+	"ROLLBACK": true, "CALL": true, "COMMENT": true, "SET": true, "RESET": true,
+}
+
+// sqlOperationName returns the query's leading SQL verb, uppercased, if
+// it's in athenaStatementVerbs, else "" (caller treats "" as "omit the
+// attribute"). Keeps a leading sqlcommenter comment, a stray paren, a
+// query ID, or garbage from leaking into db.operation.name as a
+// high-cardinality value.
+func sqlOperationName(query string) string {
+	fields := strings.Fields(query)
+	if len(fields) == 0 {
+		return ""
+	}
+	verb := strings.ToUpper(fields[0])
+	if !athenaStatementVerbs[verb] {
+		return ""
+	}
+	return verb
 }
 
 func newColumnInfo(colName string, colType any) athenatypes.ColumnInfo {
@@ -175,13 +204,10 @@ func newHeaderlessResultPage(columnNames []string, columnTypes []string, rowsDat
 	}
 }
 
-// escapeQuotes escapes v for use inside an Athena/Trino single-quoted string
-// literal. Doubling an embedded single quote is the ONLY correct transform:
-// Trino does not interpret backslash escapes inside string literals, so the
-// MySQL-style \n / \0 / \\ / \" / \r / \Z escapes this used to apply corrupted
-// the value instead of protecting it (a literal backslash or newline round
-// tripped wrong). Every other byte — NUL included — is carried through as is;
-// the value never leaves a quoted context.
+// escapeQuotes escapes v for an Athena/Trino single-quoted string literal.
+// Doubling the embedded quote is the only correct transform: Trino doesn't
+// interpret backslash escapes, so the MySQL-style \n/\0/\\/etc. this used
+// to apply corrupted the value instead of protecting it.
 // https://docs.aws.amazon.com/athena/latest/ug/select.html
 func escapeQuotes(v string) string {
 	return strings.ReplaceAll(v, "'", "''")
@@ -254,27 +280,51 @@ func printCost(region string, o *athena.GetQueryExecutionOutput) {
 			bytes = *o.QueryExecution.Statistics.DataScannedInBytes
 		}
 	}
-	// MoneyWise deliberately prints to stdout (a CLI-facing feature since
-	// v1), not through the slog pipeline — the default driver logger may
-	// be discarded while the user still wants cost output. 10 fractional
-	// digits covers a single byte scanned in the priciest region;
-	// anything past ~15 significant digits is float64 noise anyway.
+	// Prints to stdout, not through the slog pipeline: this is a CLI-facing
+	// feature since v1, and the default driver logger may be discarded
+	// while the user still wants cost output. 10 fractional digits covers
+	// a single byte scanned in the priciest region; more is float64 noise.
 	fmt.Printf("query cost: %.10f USD, scanned data: %d B, qid: %s\n",
 		estimateScanCost(region, bytes), bytes, qid)
 }
 
-var qIDPattern = regexp.MustCompile(`^[0-9a-f-]{36}$`)
+// qIDPattern matches Athena's own documented QueryExecutionId contract, not
+// the UUID shape Athena happens to use today. The StartQueryExecution API
+// reference (https://docs.aws.amazon.com/athena/latest/APIReference/API_StartQueryExecution.html)
+// specifies QueryExecutionId as Length 1-128, Pattern `\S+` (any
+// non-whitespace) — no UUID guarantee. Matching that contract exactly,
+// rather than a stricter assumption, means this never rejects a
+// QueryExecutionId AWS is actually allowed to return.
+var qIDPattern = regexp.MustCompile(`^\S{1,128}$`)
 
-// IsQID is to check if a query string is a Query ID
-// the hexadecimal Athena query ID like a44f8e61-4cbb-429a-b7ab-bea2c4a5caed
-// https://aws.amazon.com/premiumsupport/knowledge-center/access-download-athena-query-results/
+// IsQID reports whether q matches Athena's documented QueryExecutionId
+// shape (see qIDPattern) — e.g. a44f8e61-4cbb-429a-b7ab-bea2c4a5caed today,
+// but any 1-128 non-whitespace string per the API contract.
 func IsQID(q string) bool {
 	return qIDPattern.MatchString(q)
 }
 
+// looksLikeSQL reports whether query begins with a recognized Athena SQL
+// verb, case-insensitively, without requiring a following space (e.g.
+// "SELECT(1)" is valid Trino syntax with no whitespace at all). Athena's
+// real QueryExecutionIds are lowercase hex/dash UUIDs and never begin with
+// an alphabetic keyword, so this can't misclassify a genuine QID as SQL.
+// It exists because a whitespace-free statement also satisfies qIDPattern
+// (Length 1-128, \S+) and would otherwise be misrouted to a QID lookup
+// instead of being executed.
+func looksLikeSQL(query string) bool {
+	upper := strings.ToUpper(query)
+	for verb := range athenaStatementVerbs {
+		if strings.HasPrefix(upper, verb) {
+			return true
+		}
+	}
+	return false
+}
+
 // Raw is a query argument that reaches Athena verbatim: it is NOT quoted or
-// escaped by the driver. Use it — and only it — when the argument has to be a
-// SQL expression rather than a value, such as a typecast literal:
+// escaped by the driver. Use only Raw when the argument has to be a SQL
+// expression rather than a value, such as a typecast literal:
 //
 //	db.Query("SELECT * FROM t WHERE created > ?",
 //		athenadriver.Raw("TIMESTAMP "+athenadriver.FormatString("2024-07-01 00:00:00")))

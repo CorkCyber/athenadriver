@@ -34,11 +34,20 @@ const (
 	// DateUniXFormat comes along the same way as TimestampUniXFormat.
 	DateUniXFormat = "2006-01-02"
 
-	// MetricsKey is the key for Metrics in context
+	// MetricsKey is the key for a Scope in context. Nondeterministic under
+	// a pool (only takes effect on a Connect call that happens to carry
+	// it). Prefer SQLConnector.WithScope.
 	MetricsKey = TContextKey("MetricsKey")
 
-	// LoggerKey is the key for Logger in context
+	// LoggerKey is the key for a *slog.Logger in context. Same caveat as
+	// MetricsKey; prefer SQLConnector.WithLogger.
 	LoggerKey = TContextKey("LoggerKey")
+
+	// TracerKey is the key for a Tracer in context. On Connect's ctx: same
+	// pool-nondeterminism caveat as MetricsKey, prefer WithTracer. On a
+	// single QueryContext/ExecContext call's ctx: a reliable per-query
+	// override, re-checked every call by DriverTracer.StartSpan.
+	TracerKey = TContextKey("TracerKey")
 
 	// CatalogKey overrides the Athena data catalog used for a single query.
 	// Value must be a non-empty string. When unset, the driver falls back to
@@ -59,17 +68,15 @@ const (
 	// Config.ExpectedBucketOwner.
 	ExpectedBucketOwnerKey = TContextKey("ExpectedBucketOwnerKey")
 
-	// ResultReuseMaxAgeKey opts a single query into Athena's result-reuse
-	// cache (engine v3). Value must be a time.Duration in (0, 10080min]
-	// (7 days, Athena's documented maximum; values above are clamped).
-	// Athena will reuse a previous successful result for the same query
-	// text if it is no older than this duration, saving the scan cost.
-	// Use WithResultReuse for a typed helper.
+	// ResultReuseMaxAgeKey opts a query into Athena's result-reuse cache
+	// (engine v3): reuse a prior result for the same query text if newer
+	// than this. Value: time.Duration in (0, 10080min] (7 days max,
+	// clamped above). Use WithResultReuse for a typed helper.
 	ResultReuseMaxAgeKey = TContextKey("ResultReuseMaxAgeKey")
 
 	// ClientRequestTokenKey overrides the ClientRequestToken sent on
 	// StartQueryExecution for a single query. Value must be a non-empty
-	// string (32–128 ASCII chars per Athena's API). When unset, the driver
+	// string (32-128 ASCII chars per Athena's API). When unset, the driver
 	// generates a fresh UUID per query so SDK-level retries do not re-charge
 	// scan cost.
 	ClientRequestTokenKey = TContextKey("ClientRequestTokenKey")
@@ -83,10 +90,10 @@ const (
 	// DSN-driven static credentials path to no-op.
 	DummyRegion = "dummy"
 
-	// DummyAccessID — see DummyRegion.
+	// DummyAccessID: see DummyRegion.
 	DummyAccessID = "dummy"
 
-	// DummySecretAccessKey — see DummyRegion.
+	// DummySecretAccessKey: see DummyRegion.
 	DummySecretAccessKey = "dummy"
 )
 

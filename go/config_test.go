@@ -156,6 +156,23 @@ func TestConfig_SetLogging(t *testing.T) {
 	assert.False(t, testConf.LoggingEnabled)
 }
 
+func TestConfig_SetTracing(t *testing.T) {
+	testConf := NewNoOpsConfig()
+	assert.True(t, testConf.TracingEnabled, "on by default, matching Metrics/Logging")
+	testConf.TracingEnabled = false
+	assert.False(t, testConf.TracingEnabled)
+
+	// DSN round-trip: off is explicit in the DSN, on (the default) is terse.
+	dsn := testConf.Stringify()
+	assert.Contains(t, dsn, "TracingEnabled=false")
+	roundTripped, err := NewConfig(dsn)
+	assert.NoError(t, err)
+	assert.False(t, roundTripped.TracingEnabled)
+
+	testConf.TracingEnabled = true
+	assert.NotContains(t, testConf.Stringify(), "TracingEnabled")
+}
+
 func TestConfig_IsMissingAsEmptyString(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	testConf.MissingAsEmptyString = true

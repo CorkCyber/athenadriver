@@ -1,32 +1,38 @@
 // SPDX-License-Identifier: MIT
 
-// Package otel adapts an OpenTelemetry go.opentelemetry.io/otel/metric.Meter
-// to the driver's athenadriver.Scope interface. Counters map to
-// Int64Counter, timers to Float64Histogram (unit ms).
+// Package otel adapts OpenTelemetry to the driver's Scope (metrics) and
+// Tracer (spans) interfaces.
 //
-// Usage:
+// Metrics: metric.Meter -> athenadriver.Scope (counters -> Int64Counter,
+// timers -> Float64Histogram, unit ms). Instruments created lazily, cached
+// by name.
 //
 //	meter := otel.Meter("athenadriver")
-//	adapter := otelscope.New(meter)
-//	ctx = context.WithValue(ctx, drv.MetricsKey, adapter)
+//	ctx = context.WithValue(ctx, drv.MetricsKey, otelscope.New(meter))
 //
-// Instruments are created lazily on first reference and cached by name.
-// A shared background context is used for record calls; supply per-call
-// attributes upstream if you need request-scoped labels.
+// Tracing: trace.Tracer -> athenadriver.Tracer. Every span is tagged
+// SpanKindClient (database call) so OTel-aware backends render it as a DB
+// span.
+//
+//	tracer := otel.Tracer("athenadriver")
+//	ctx = context.WithValue(ctx, drv.TracerKey, otelscope.NewTracer(tracer))
 package otel
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 
 	drv "github.com/CorkCyber/athenadriver/v2/go"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
-// New wraps an otel metric.Meter so it satisfies drv.Scope. A nil meter
-// returns drv.NoopScope instead of an adapter that panics on first use —
-// mirrors the driver's own nil handling in NewObservability.
+// New wraps an otel metric.Meter as drv.Scope. Nil meter -> drv.NoopScope,
+// not a panicking adapter.
 func New(meter metric.Meter) drv.Scope {
 	if meter == nil {
 		return drv.NoopScope
@@ -38,9 +44,9 @@ func New(meter metric.Meter) drv.Scope {
 	}
 }
 
-// scope caches the fully-wrapped drv.Counter/drv.Timer, not the raw otel
-// instrument: the driver calls Scope().Counter(name) at the call site (once
-// per unconvertible cell, say), so a cache hit must not allocate a wrapper.
+// scope caches the wrapped drv.Counter/drv.Timer, not the raw instrument.
+// The driver calls Scope().Counter(name) per call site, so a cache hit
+// must not allocate.
 type scope struct {
 	meter    metric.Meter
 	mu       sync.RWMutex
@@ -103,3 +109,48 @@ type timer struct{ h metric.Float64Histogram }
 func (a timer) Record(d time.Duration) {
 	a.h.Record(context.Background(), float64(d)/float64(time.Millisecond))
 }
+
+// NewTracer wraps an otel trace.Tracer as drv.Tracer. Nil -> drv.NoopTracer,
+// same as New.
+func NewTracer(tracer trace.Tracer) drv.Tracer {
+	if tracer == nil {
+		return drv.NoopTracer
+	}
+	return tracerAdapter{tracer}
+}
+
+type tracerAdapter struct{ tracer trace.Tracer }
+
+// StartSpan always starts a CLIENT-kind span. OTel's database semantic
+// conventions require it for a backend to render this as a DB call.
+func (t tracerAdapter) StartSpan(ctx context.Context, name string) (context.Context, drv.Span) {
+	ctx, span := t.tracer.Start(ctx, name, trace.WithSpanKind(trace.SpanKindClient))
+	return ctx, spanAdapter{span}
+}
+
+type spanAdapter struct{ span trace.Span }
+
+func (s spanAdapter) SetAttr(key string, value any) {
+	switch v := value.(type) {
+	case string:
+		s.span.SetAttributes(attribute.String(key, v))
+	case bool:
+		s.span.SetAttributes(attribute.Bool(key, v))
+	case int64:
+		s.span.SetAttributes(attribute.Int64(key, v))
+	case float64:
+		s.span.SetAttributes(attribute.Float64(key, v))
+	default:
+		s.span.SetAttributes(attribute.String(key, fmt.Sprint(v)))
+	}
+}
+
+func (s spanAdapter) RecordError(err error) {
+	if err == nil {
+		return
+	}
+	s.span.RecordError(err)
+	s.span.SetStatus(codes.Error, err.Error())
+}
+
+func (s spanAdapter) End() { s.span.End() }

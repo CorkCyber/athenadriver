@@ -9,6 +9,7 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -265,11 +266,25 @@ func TestUilts_GetCost(t *testing.T) {
 	assert.Equal(t, 9.0/5.0*estimateScanCost("us-east-1", 1<<40), estimateScanCost("sa-east-1", 1<<40))
 }
 
+// TestUtils_IsQID pins IsQID to Athena's documented QueryExecutionId
+// contract (1-128 non-whitespace chars, https://docs.aws.amazon.com/athena/latest/APIReference/API_StartQueryExecution.html),
+// not an assumed UUID shape: anything with whitespace or over 128 chars is
+// rejected as "definitely not a QueryExecutionId", but a short or
+// oddly-shaped token is accepted since AWS's contract allows it.
 func TestUtils_IsQID(t *testing.T) {
-	assert.False(t, IsQID(`select "a44f8e61-4cbb-429a-b7ab-bea2c4a5caed"`))
 	assert.True(t, IsQID("a44f8e61-4cbb-429a-b7ab-bea2c4a5caed"))
-	assert.False(t, IsQID("a44f8e61-4cbb-429a-b7ab-bea2c4a5caeD"))
-	assert.False(t, IsQID("a44f8e61"))
+	assert.True(t, IsQID("a44f8e61-4cbb-429a-b7ab-bea2c4a5caeD"))
+	assert.True(t, IsQID("a44f8e61"))
+
+	// Real SQL almost always contains whitespace; that's what actually
+	// distinguishes it from a QueryExecutionId, not a UUID assumption.
+	assert.False(t, IsQID(`select "a44f8e61-4cbb-429a-b7ab-bea2c4a5caed"`))
+	assert.False(t, IsQID("select 1"))
+
+	// Length bound from the contract: 128 chars is the max.
+	assert.True(t, IsQID(strings.Repeat("a", 128)))
+	assert.False(t, IsQID(strings.Repeat("a", 129)))
+	assert.False(t, IsQID(""))
 }
 
 func Test_newHeaderResultPage(t *testing.T) {
@@ -346,4 +361,94 @@ func TestFormatBytes(t *testing.T) {
 			assert.Equal(t, tc.expected, FormatBytes(tc.input))
 		})
 	}
+}
+
+// TestSQLOperationName_CardinalityLeaks pins the exact leak vectors round-2
+// tracing review found: sqlcommenter-style leading query comments (a real,
+// common ORM/OTel-integration practice) and a stray leading paren must
+// return "" for db.operation.name, not the raw token.
+func TestSQLOperationName_CardinalityLeaks(t *testing.T) {
+	cases := []struct {
+		name  string
+		query string
+		want  string
+	}{
+		{"plain select", "select 1", "SELECT"},
+		{"sqlcommenter leading comment", "/*traceparent='00-abc-01'*/ select 1", ""},
+		{"stray leading paren", "(select 1) union (select 2)", ""},
+		{"bare query id", "a44f8e61-4cbb-429a-b7ab-bea2c4a5caed", ""},
+		{"garbage token", "!!!not sql", ""},
+		{"unrecognized verb", "vacuum-ish nonsense", ""},
+		{"empty", "", ""},
+		{"whitespace only", "   \t\n  ", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, sqlOperationName(tc.query))
+		})
+	}
+}
+
+// FuzzSQLOperationName is a chaos/completeness check: whatever garbage a
+// caller's query builder produces, sqlOperationName must stay within the
+// low-cardinality contract db.operation.name requires: either "" or one of
+// the fixed allowlisted verbs, never an arbitrary pass-through token.
+func FuzzSQLOperationName(f *testing.F) {
+	seeds := []string{
+		"select 1",
+		"/*traceparent=00-x-01*/ select 1",
+		"(select 1)",
+		"a44f8e61-4cbb-429a-b7ab-bea2c4a5caed",
+		"",
+		"   ",
+		"SELECT'; DROP TABLE x; --",
+		"select\x00null\x00byte",
+		"日本語 select",
+	}
+	for _, s := range seeds {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, query string) {
+		got := sqlOperationName(query)
+		if got == "" {
+			return
+		}
+		if !athenaStatementVerbs[got] {
+			t.Fatalf("sqlOperationName(%q) = %q, not in the allowlist", query, got)
+		}
+	})
+}
+
+// FuzzDBSpanNameAndOperation chaos-tests the span-name/operation contract
+// directly: no fuzzed query, under any pseudo-command, may put a UUID (or
+// any non-allowlisted token) into the span name or db.operation.name.
+func FuzzDBSpanNameAndOperation(f *testing.F) {
+	const uuid = "a44f8e61-4cbb-429a-b7ab-bea2c4a5caed"
+	seeds := []string{
+		"select 1",
+		uuid,
+		"/*trace*/ select 1",
+		"pc:get_query_id " + uuid,
+		"",
+	}
+	for _, pc := range []string{"", PCGetQID, PCGetQIDStatus, PCStopQID} {
+		for _, s := range seeds {
+			f.Add(pc, s, "mydb")
+		}
+	}
+	f.Fuzz(func(t *testing.T, pseudoCommand, query, database string) {
+		_, op := dbSpanNameAndOperation(pseudoCommand, query, database)
+		if op != "" && op != "GET_QUERY_ID" && op != "GET_QUERY_ID_STATUS" && op != "STOP_QUERY_ID" && !athenaStatementVerbs[op] {
+			t.Fatalf("dbSpanNameAndOperation(%q, %q, %q) op = %q, not a recognized low-cardinality value",
+				pseudoCommand, query, database, op)
+		}
+		// op must never equal the raw query when the query is QID-shaped.
+		// spanName is not checked the same way: it legitimately embeds the
+		// (separately fuzzed) database name, which can coincidentally
+		// collide with a degenerate query on repeated-character inputs.
+		if IsQID(query) && strings.EqualFold(op, query) {
+			t.Fatalf("dbSpanNameAndOperation(%q, %q, %q) leaked the query ID into op=%q",
+				pseudoCommand, query, database, op)
+		}
+	})
 }

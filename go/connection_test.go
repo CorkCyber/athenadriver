@@ -6,9 +6,12 @@ import (
 	"context"
 	"database/sql"
 	"database/sql/driver"
+	"fmt"
 	"math"
 	"math/rand"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -168,6 +171,25 @@ func TestConnection_CloseRace(t *testing.T) {
 	assert.ErrorIs(t, err, driver.ErrBadConn)
 }
 
+// TestQueryContext_WhitespaceFreeSQLIsNotMisroutedAsQID pins the fix for a
+// real Trino ambiguity: "SELECT(1)" has no whitespace at all (valid syntax -
+// SQL tokenizes on punctuation, not just spaces), so it also satisfies
+// IsQID's \S{1,128} contract. Without the looksLikeSQL guard this query
+// never reaches StartQueryExecution at all: it's misrouted straight to a
+// (bogus) cached-QID lookup instead of being executed.
+func TestQueryContext_WhitespaceFreeSQLIsNotMisroutedAsQID(t *testing.T) {
+	t.Parallel()
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		cfg.WorkGroup = nil
+	})
+	nm := c.athenaClient.(*mockAthenaClient)
+
+	_, err := c.QueryContext(context.Background(), "SELECT(1)", nil)
+	assert.Nil(t, err)
+	assert.NotNil(t, nm.lastStartInput, "StartQueryExecution must be called; the query was misrouted as a QID lookup instead")
+	assert.Equal(t, "SELECT(1)", *nm.lastStartInput.QueryString)
+}
+
 // TestQueryContext_LiteralQuestionMark is the regression guard for
 // running interpolateParams (and its naive `?`-counting check) on the
 // ExecutionParameters path: a `?` inside a string literal is not a
@@ -220,6 +242,172 @@ func TestQueryContext_StringArgIsQuoted(t *testing.T) {
 		[]driver.NamedValue{{Value: Raw("TIMESTAMP '2024-07-01 00:00:00'")}})
 	assert.Nil(t, err)
 	assert.Equal(t, []string{"TIMESTAMP '2024-07-01 00:00:00'"}, nm.lastStartInput.ExecutionParameters)
+}
+
+// TestQueryContext_TracesAsDatabaseSpan proves a successful query is
+// wrapped in exactly one span carrying the OpenTelemetry database-client
+// attributes a backend needs to recognize it as a DB call, plus the
+// athena.* extension attributes, and that the span is always ended.
+func TestQueryContext_TracesAsDatabaseSpan(t *testing.T) {
+	t.Parallel()
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		cfg.WorkGroup = nil // skip remote workgroup resolution
+	})
+	tracer := &recordingTracer{}
+	c.tracer.SetTracer(tracer)
+
+	_, err := c.QueryContext(context.Background(), "select 1", nil)
+	assert.Nil(t, err)
+
+	assert.Equal(t, "SELECT default", tracer.startedName)
+	assert.Equal(t, "aws.athena", tracer.span.attrs[otelDBSystemName])
+	assert.Equal(t, "default", tracer.span.attrs[otelDBNamespace])
+	assert.Equal(t, "SELECT", tracer.span.attrs[otelDBOperationName])
+	assert.Equal(t, "PING_OK_QID", tracer.span.attrs[athenaAttrQueryID])
+	assert.Contains(t, tracer.span.attrs, athenaAttrStmtType)
+	assert.Empty(t, tracer.span.errs)
+	assert.True(t, tracer.span.ended)
+}
+
+// TestDBSpanNameAndOperation pins the low-cardinality contract for QID-shaped
+// input: a bare query ID or a QID-targeting pseudo-command must never put
+// the ID itself into the span name or db.operation.name.
+func TestDBSpanNameAndOperation(t *testing.T) {
+	cases := []struct {
+		name          string
+		pseudoCommand string
+		query         string
+		wantOperation string
+	}{
+		{"plain select", "", "select 1", "SELECT"},
+		{"bare query ID", "", "a44f8e61-4cbb-429a-b7ab-bea2c4a5caed", "GET_QUERY_ID"},
+		{"get_query_id_status", PCGetQIDStatus, "a44f8e61-4cbb-429a-b7ab-bea2c4a5caed", "GET_QUERY_ID_STATUS"},
+		{"stop_query_id", PCStopQID, "a44f8e61-4cbb-429a-b7ab-bea2c4a5caed", "STOP_QUERY_ID"},
+		{"get_query_id submits real SQL", PCGetQID, "select 1", "SELECT"},
+		{"get_query_id misused with a QID", PCGetQID, "a44f8e61-4cbb-429a-b7ab-bea2c4a5caed", "GET_QUERY_ID"},
+		{"empty query", "", "", ""},
+	}
+	const uuid = "a44f8e61-4cbb-429a-b7ab-bea2c4a5caed"
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			spanName, op := dbSpanNameAndOperation(tc.pseudoCommand, tc.query, "mydb")
+			assert.Equal(t, tc.wantOperation, op)
+			assert.NotContains(t, strings.ToLower(spanName), uuid,
+				"a UUID must never appear in the span name")
+			assert.NotContains(t, strings.ToLower(op), uuid,
+				"a UUID must never appear in db.operation.name")
+		})
+	}
+}
+
+// TestQueryContext_TracesErrorsOnSpan proves a failed query records the
+// error on its span (RecordError + error.type) instead of the span
+// silently ending as if the call had succeeded.
+func TestQueryContext_TracesErrorsOnSpan(t *testing.T) {
+	t.Parallel()
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		cfg.WorkGroup = nil
+		cfg.ReadOnly = true
+	})
+	tracer := &recordingTracer{}
+	c.tracer.SetTracer(tracer)
+
+	_, err := c.QueryContext(context.Background(), "drop table t", nil)
+	assert.Error(t, err)
+
+	assert.Len(t, tracer.span.errs, 1)
+	assert.Equal(t, err, tracer.span.errs[0])
+	assert.Equal(t, dbErrorType(err), tracer.span.attrs[otelErrorType])
+	assert.True(t, tracer.span.ended)
+}
+
+// TestQueryContext_ParseErrorGetsASpan proves a query that fails before
+// dbSpanNameAndOperation can even run (bad pseudo-command syntax) still
+// records a span, instead of returning span-less and invisible to tracing.
+func TestQueryContext_ParseErrorGetsASpan(t *testing.T) {
+	t.Parallel()
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		cfg.WorkGroup = nil
+	})
+	tracer := &recordingTracer{}
+	c.tracer.SetTracer(tracer)
+
+	_, err := c.QueryContext(context.Background(), "pc:bogus_command", nil)
+	assert.Error(t, err)
+
+	assert.Equal(t, "athena.query", tracer.startedName)
+	assert.Equal(t, "aws.athena", tracer.span.attrs[otelDBSystemName])
+	assert.Len(t, tracer.span.errs, 1)
+	assert.Equal(t, dbErrorType(err), tracer.span.attrs[otelErrorType])
+	assert.True(t, tracer.span.ended)
+}
+
+func TestDbErrorType(t *testing.T) {
+	assert.Equal(t, "*errors.errorString", dbErrorType(context.Canceled))
+	assert.Equal(t, "*fmt.wrapError", dbErrorType(fmt.Errorf("wrapped: %w", context.Canceled)))
+
+	apiErr := &smithy.GenericAPIError{Code: "ThrottlingException"}
+	assert.Equal(t, "ThrottlingException", dbErrorType(apiErr))
+	assert.Equal(t, "ThrottlingException", dbErrorType(fmt.Errorf("wrapped: %w", apiErr)))
+}
+
+// countingTracer/countingSpan are a concurrency-safe recording double: real
+// pooled usage shares ONE Tracer instance (set once via WithTracer) across
+// every connection database/sql opens, so a chaos test simulating that pool
+// needs a double that itself tolerates concurrent StartSpan calls — unlike
+// recordingTracer, which stores one shared, unsynchronized *recordingSpan.
+type countingTracer struct {
+	started atomic.Int64
+	ended   atomic.Int64
+}
+
+func (t *countingTracer) StartSpan(ctx context.Context, _ string) (context.Context, Span) {
+	t.started.Add(1)
+	return ctx, &countingSpan{ended: &t.ended}
+}
+
+type countingSpan struct {
+	ended *atomic.Int64
+}
+
+func (s *countingSpan) SetAttr(string, any) {}
+func (s *countingSpan) RecordError(error)   {}
+func (s *countingSpan) End()                { s.ended.Add(1) }
+
+// TestQueryContext_ConcurrentPooledQueries_RaceFree chaos-tests the pooled
+// scenario every prior finding in this area was about: many connections
+// (as database/sql's pool would open under load), all sharing the SAME
+// Tracer instance via WithTracer/SetTracer, hit with a concurrent mix of
+// successful queries, query failures, and pseudo-command parse failures.
+// Run with -race, this is the completeness check for every span-lifecycle
+// fix in this file: no data race, and every started span is ended exactly
+// once — including on every error path.
+func TestQueryContext_ConcurrentPooledQueries_RaceFree(t *testing.T) {
+	shared := &countingTracer{}
+	const goroutines = 50
+
+	queries := []string{
+		"select 1",         // success
+		"drop table t",     // Athena-side failure (read-only guard)
+		"pc:bogus_command", // pseudo-command parse failure
+	}
+
+	var wg sync.WaitGroup
+	for i := range goroutines {
+		wg.Go(func() {
+			c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+				cfg.WorkGroup = nil
+				cfg.ReadOnly = true
+			})
+			c.tracer.SetTracer(shared)
+			q := queries[i%len(queries)]
+			_, _ = c.QueryContext(context.Background(), q, nil)
+		})
+	}
+	wg.Wait()
+
+	assert.Equal(t, int64(goroutines), shared.started.Load())
+	assert.Equal(t, int64(goroutines), shared.ended.Load())
 }
 
 // CheckNamedValue must keep Raw intact; database/sql's default converter
@@ -546,17 +734,17 @@ func TestConnection_QueryContext2(t *testing.T) {
 		connector:    NoopsSQLConnector(),
 		tracer:       NewObservability(NewNoOpsConfig(), nil, nil),
 	}
-	driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error",
+	driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error x",
 		[]driver.NamedValue{})
 	assert.Nil(t, driverRows)
 	assert.NotNil(t, err)
 
-	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateCancelled",
+	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateCancelled x",
 		[]driver.NamedValue{})
 	assert.Nil(t, driverRows)
 	assert.Equal(t, context.Canceled, err)
 
-	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateFailed",
+	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateFailed x",
 		[]driver.NamedValue{})
 	assert.Nil(t, driverRows)
 	assert.Equal(t, ErrTestMockFailedByAthena, err)
@@ -609,7 +797,7 @@ func TestConnection_QueryContext_WorkgroupVariants(t *testing.T) {
 				assert.ErrorContains(t, err, tc.ping)
 				assert.NotErrorIs(t, err, driver.ErrBadConn)
 			}
-			driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error",
+			driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error x",
 				[]driver.NamedValue{})
 			assert.Nil(t, driverRows)
 			assert.NotNil(t, err)
@@ -624,56 +812,56 @@ func TestConnection_QueryContext7(t *testing.T) {
 	e := c.Ping(context.Background())
 	assert.Nil(t, e)
 
-	driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error",
+	driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error x",
 		[]driver.NamedValue{})
 	assert.Nil(t, driverRows)
 	assert.NotNil(t, err)
 
-	dr, er := c.ExecContext(context.Background(), "StartQueryExecution_nil_error",
+	dr, er := c.ExecContext(context.Background(), "StartQueryExecution_nil_error x",
 		[]driver.NamedValue{})
 	assert.Nil(t, dr)
 	assert.NotNil(t, er)
 
-	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateCancelled",
+	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateCancelled x",
 		[]driver.NamedValue{})
 	assert.Nil(t, driverRows)
 	assert.Equal(t, context.Canceled, err)
 
-	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateFailed",
+	driverRows, err = c.QueryContext(context.Background(), "StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateFailed x",
 		[]driver.NamedValue{})
 	assert.Nil(t, driverRows)
 	assert.Equal(t, ErrTestMockFailedByAthena, err)
 
-	query := "SELECTExecContext_OK"
+	query := "SELECTExecContext_OK x"
 	dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
 	assert.Nil(t, er)
 	assert.NotNil(t, dr)
 
-	query = "SELECTQueryContext_OK"
+	query = "SELECTQueryContext_OK x"
 	driverRows, err = c.QueryContext(context.Background(), query, []driver.NamedValue{})
 	assert.Nil(t, err)
 	assert.NotNil(t, driverRows)
 
-	query = "SELECTQueryContext_OK"
+	query = "SELECTQueryContext_OK x"
 	value := driver.NamedValue{Value: uint64(0)}
 	driverRows, err = c.QueryContext(context.Background(), query, []driver.NamedValue{value})
 	assert.NotNil(t, err)
 	assert.Nil(t, driverRows)
 
-	query = "SELECTQueryContext_?"
+	query = "SELECTQueryContext_? x"
 	value = driver.NamedValue{Value: "OK"}
 	driverRows, err = c.QueryContext(context.Background(), query, []driver.NamedValue{value})
 	assert.Nil(t, err)
 	assert.NotNil(t, driverRows)
 
-	query = "SELECTQueryContext_CANCEL_OK"
+	query = "SELECTQueryContext_CANCEL_OK x"
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
 	defer cancel()
 	driverRows, err = c.QueryContext(ctx, query, []driver.NamedValue{})
 	assert.NotNil(t, err)
 	assert.Nil(t, driverRows)
 
-	query = "SELECTQueryContext_CANCEL_FAIL"
+	query = "SELECTQueryContext_CANCEL_FAIL x"
 	ctx, cancel = context.WithTimeout(context.Background(), 1*time.Nanosecond)
 	defer cancel()
 	driverRows, err = c.QueryContext(ctx, query, []driver.NamedValue{})
@@ -683,7 +871,7 @@ func TestConnection_QueryContext7(t *testing.T) {
 	// Query stays Queued; a 1-second service limit trips the timeout on
 	// the first poll.
 	c.connector.config.ServiceLimit = &ServiceLimitOverride{DDLQueryTimeout: 1, DMLQueryTimeout: 1}
-	query = "SELECTQueryContext_TIMEOUT"
+	query = "SELECTQueryContext_TIMEOUT x"
 	ctx, cancel = context.WithTimeout(context.Background(), 1*time.Hour)
 	defer cancel()
 	driverRows, err = c.QueryContext(ctx, query, []driver.NamedValue{})
@@ -696,18 +884,18 @@ func TestConnection_QueryContext7(t *testing.T) {
 	assert.Nil(t, driverRows)
 
 	// Cancelled by AWS Athena
-	query = "SELECTQueryContext_AWS_CANCEL"
+	query = "SELECTQueryContext_AWS_CANCEL x"
 	driverRows, err = c.QueryContext(context.Background(), query, []driver.NamedValue{})
 	assert.NotNil(t, err)
 	assert.Nil(t, driverRows)
 
 	// failed by AWS Athena
-	query = "SELECTQueryContext_AWS_FAIL"
+	query = "SELECTQueryContext_AWS_FAIL x"
 	driverRows, err = c.QueryContext(context.Background(), query, []driver.NamedValue{})
 	assert.NotNil(t, err)
 	assert.Nil(t, driverRows)
 
-	query = "SELECTQueryContext_CANCEL_OK"
+	query = "SELECTQueryContext_CANCEL_OK x"
 	ctx, cancel = context.WithTimeout(context.Background(), PoolInterval*time.Second*2)
 	defer cancel()
 	driverRows, err = c.QueryContext(ctx, query, []driver.NamedValue{})
@@ -766,7 +954,7 @@ func TestMoneyWise(t *testing.T) {
 		_ = cfg.SetWorkGroup(NewWG(DefaultWGName, nil, wgTags))
 		cfg.MoneyWise = true
 	})
-	query := "SELECTExecContext_OK"
+	query := "SELECTExecContext_OK x"
 	dr, er := c.ExecContext(context.Background(), query, []driver.NamedValue{})
 	assert.Nil(t, er)
 	assert.NotNil(t, dr)
@@ -776,14 +964,14 @@ func TestMoneyWise(t *testing.T) {
 	assert.Nil(t, er)
 	assert.NotNil(t, dr)
 
-	query = "SELECTQueryContext_CANCEL_OK"
+	query = "SELECTQueryContext_CANCEL_OK x"
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)
 	defer cancel()
 	dr2, err := c.QueryContext(ctx, query, []driver.NamedValue{})
 	assert.NotNil(t, err)
 	assert.Nil(t, dr2)
 
-	query = "SELECTQueryContext_AWS_CANCEL"
+	query = "SELECTQueryContext_AWS_CANCEL x"
 	ctx, cancel = context.WithTimeout(context.Background(), 1*time.Nanosecond)
 	defer cancel()
 	dr2, err = c.QueryContext(ctx, query, []driver.NamedValue{})
@@ -821,12 +1009,12 @@ func Test_PseudoCommand(t *testing.T) {
 	assert.NotNil(t, er)
 	assert.Nil(t, dr)
 
-	query = "pc:get_query_id FAILED_AFTER_GETQID"
+	query = "pc:get_query_id FAILED_AFTER_GETQID x"
 	dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
 	assert.Equal(t, "FAILED_AFTER_GETQID_FAILED", er.Error())
 	assert.Nil(t, dr)
 
-	query = "pc:get_query_id FAILED_AFTER_GETQID2"
+	query = "pc:get_query_id FAILED_AFTER_GETQID2 x"
 	dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
 	assert.Nil(t, er)
 	assert.NotNil(t, dr)
@@ -836,7 +1024,7 @@ func Test_PseudoCommand(t *testing.T) {
 	assert.NotNil(t, er)
 	assert.Nil(t, dr)
 
-	query = "pc:get_query_id SELECTQueryContext_CANCEL_OK"
+	query = "pc:get_query_id SELECTQueryContext_CANCEL_OK x"
 	dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
 	assert.Nil(t, er)
 	assert.NotNil(t, dr)
@@ -1291,7 +1479,7 @@ func TestResolveWorkgroup_ConcurrentQueryContext(t *testing.T) {
 				connector:    seed.connector,
 				tracer:       NewObservability(NewNoOpsConfig(), nil, nil),
 			}
-			_, err := c.QueryContext(context.Background(), "SELECTQueryContext_OK", nil)
+			_, err := c.QueryContext(context.Background(), "SELECTQueryContext_OK x", nil)
 			assert.ErrorIs(t, err, ErrTestMockGeneric,
 				"every caller must get past workgroup resolution")
 		})

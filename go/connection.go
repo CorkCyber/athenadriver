@@ -17,6 +17,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
+	"github.com/aws/smithy-go"
 )
 
 // Connection is a connection to AWS Athena. It is not used concurrently by multiple goroutines.
@@ -33,6 +34,31 @@ type Connection struct {
 	// window. Athena has no server-side session to release anyway.
 	closed atomic.Bool
 }
+
+// OpenTelemetry semantic-convention attribute keys for database client
+// spans (https://opentelemetry.io/docs/specs/semconv/db/database-spans/),
+// plus the athena.* vendor extension attributes this driver adds for
+// details the generic conventions don't cover.
+const (
+	otelDBSystemName    = "db.system.name"
+	otelDBNamespace     = "db.namespace"
+	otelDBOperationName = "db.operation.name"
+	otelServerAddress   = "server.address"
+	otelErrorType       = "error.type"
+	// otelDBSystemAthena follows the registry's aws.* namespacing
+	// (aws.dynamodb, aws.redshift, ...). "trino" — the closest registered
+	// value, since Athena's engine is Trino-derived — would be actively
+	// misleading: it implies a self-hosted Trino coordinator/worker
+	// cluster, REST protocol, and stage-level query-plan data Athena does
+	// not expose. "aws.athena" is honest about the managed service and
+	// keeps the vendor information "other_sql" would throw away.
+	otelDBSystemAthena    = "aws.athena"
+	athenaAttrQueryID     = "athena.query_id"
+	athenaAttrWorkgroup   = "athena.workgroup"
+	athenaAttrStmtType    = "athena.statement_type"
+	athenaAttrDataScanned = "athena.data_scanned_bytes"
+	athenaAttrCatalog     = "athena.catalog"
+)
 
 // ExecContext executes a query that doesn't return rows, such as an INSERT or UPDATE.
 // Delegates to QueryContext so parameterized statements take Athena's
@@ -86,6 +112,58 @@ func (c *Connection) getHeaderlessSingleRowResultPage(ctx context.Context, qid s
 	return r, nil
 }
 
+// dbSpanNameAndOperation derives the span name and db.operation.name value
+// for a query, post pseudo-command stripping. Both must stay low-cardinality
+// (the spec requires it of db.operation.name, and a span name that varies
+// per call defeats grouping/aggregation in any real backend), so a bare
+// query ID or a QID-shaped pseudo-command uses a fixed label instead of the
+// UUID itself — a per-call-unique value is the one thing neither attribute
+// may be.
+func dbSpanNameAndOperation(pseudoCommand, query, database string) (spanName, operation string) {
+	switch {
+	case pseudoCommand == PCGetQIDStatus:
+		operation = "GET_QUERY_ID_STATUS"
+	case pseudoCommand == PCStopQID:
+		operation = "STOP_QUERY_ID"
+	case IsQID(query):
+		// A query-ID-shaped query fetches a cached result set (or, for
+		// pc:get_query_id specifically, is a misuse — passing a QID where
+		// real SQL belongs — but query is still not SQL either way); never
+		// real SQL regardless of which pseudo-command, if any, preceded
+		// it. Checked independent of pseudoCommand so this catches every
+		// route to a QID-shaped query, not just the no-prefix one.
+		operation = "GET_QUERY_ID"
+	default:
+		// Plain queries, and pc:get_query_id given real SQL (the intended
+		// usage: submit a query and return its ID once known).
+		operation = sqlOperationName(query)
+	}
+	if operation == "" {
+		return "athena.query", ""
+	}
+	if database == "" {
+		return operation, operation
+	}
+	return operation + " " + database, operation
+}
+
+// dbErrorType returns a low-cardinality error.type value: an AWS API error
+// code (e.g. "ThrottlingException") when err wraps a modeled smithy error —
+// errors.As sees through any %w wrapping, so this still works when
+// awaitQueryCompletion or similar has wrapped the original AWS error. Falls
+// back to the Go type name for the driver's own sentinel/local errors
+// (read-only violation, invalid query, ...); their message text is not
+// used as-is since several embed a query ID, workgroup name, or raw user
+// input, which would make error.type as unbounded-cardinality as the bug
+// this replaces.
+func dbErrorType(err error) string {
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.ErrorCode()
+	}
+	return fmt.Sprintf("%T", err)
+}
+
 // QueryContext is implemented to be called by `DB.Query` (QueryerContext interface).
 //
 // "QueryerContext is an optional interface that may be implemented by a Conn.
@@ -96,19 +174,68 @@ func (c *Connection) getHeaderlessSingleRowResultPage(ctx context.Context, qid s
 //
 // With QueryContext implemented, we don't need Queryer.
 // QueryerContext must honor the context timeout and return when the context is canceled.
-func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs []driver.NamedValue) (driver.Rows, error) {
+//
+// Named returns so a single deferred span.End() (see the db.*/athena.*
+// attributes below) covers every return path without touching each one
+// individually.
+func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs []driver.NamedValue) (result driver.Rows, err error) {
 	if c.closed.Load() || c.athenaClient == nil {
 		return nil, driver.ErrBadConn
 	}
 	var obs = c.tracer
-	pseudoCommand, remaining, immediate, err := c.parsePseudoCommand(ctx, query)
-	if err != nil {
-		return nil, err
+
+	// Pseudo-command parsing runs before the span starts: it never reaches
+	// Athena, so it isn't a database call, and it also decides the span
+	// name/db.operation.name below — a Tracer has no way to rename a span
+	// after StartSpan, so this must happen first. A parse error still gets
+	// a (minimal) span: every other user-visible query failure produces
+	// one, and a caller debugging a typo'd pc: command should not find
+	// tracing silent on exactly the query that failed.
+	pseudoCommand, remaining, immediate, perr := c.parsePseudoCommand(ctx, query)
+	if perr != nil {
+		_, errSpan := obs.StartSpan(ctx, "athena.query")
+		errSpan.SetAttr(otelDBSystemName, otelDBSystemAthena)
+		errSpan.SetAttr(otelErrorType, dbErrorType(perr))
+		errSpan.RecordError(perr)
+		errSpan.End()
+		return nil, perr
 	}
 	if immediate != nil {
 		return immediate, nil
 	}
 	query = remaining
+
+	// One span per database call, per OpenTelemetry's semantic conventions
+	// for database client spans: db.system.name identifies this as a
+	// database call so a backend (Sentry, Datadog, etc.) renders it as
+	// one. db.query.text is deliberately NOT attached — the DDL
+	// interpolation path embeds literal argument values in the query
+	// text, and a trace is not a place those should land by default.
+	//
+	// StartSpan itself checks ctx for a per-query TracerKey override
+	// (e.g. a request-scoped sampling decision) before falling back to
+	// the Tracer bound to this Connection.
+	spanName, opName := dbSpanNameAndOperation(pseudoCommand, query, c.connector.config.DB)
+	var span Span
+	ctx, span = obs.StartSpan(ctx, spanName)
+	span.SetAttr(otelDBSystemName, otelDBSystemAthena)
+	if db := c.connector.config.DB; db != "" {
+		span.SetAttr(otelDBNamespace, db)
+	}
+	if opName != "" {
+		span.SetAttr(otelDBOperationName, opName)
+	}
+	if addr := c.connector.serverAddress(); addr != "" {
+		span.SetAttr(otelServerAddress, addr)
+	}
+	defer func() {
+		if err != nil {
+			span.SetAttr(otelErrorType, dbErrorType(err))
+			span.RecordError(err)
+		}
+		span.End()
+	}()
+
 	if c.connector.config.ReadOnly {
 		if !isReadOnlyStatement(query) {
 			obs.Scope().Counter(DriverName + ".failure.querycontext.writeviolation").Inc(1)
@@ -148,13 +275,16 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 	if err != nil {
 		return nil, err
 	}
+	span.SetAttr(athenaAttrWorkgroup, wg.Name)
 
 	timeWorkgroup := time.Since(now)
 	startOfStartQueryExecution := time.Now()
 	obs.Scope().Timer(DriverName + ".query.workgroup").Record(timeWorkgroup)
 
-	// case 1 - query directly using QID
-	if IsQID(query) {
+	// case 1 - query directly using QID. looksLikeSQL guards against a
+	// whitespace-free statement (e.g. "SELECT(1)") that also happens to
+	// satisfy IsQID's \S{1,128} contract.
+	if IsQID(query) && !looksLikeSQL(query) {
 		if pseudoCommand == PCGetQIDStatus {
 			statusResp, err := c.athenaClient.GetQueryExecution(ctx, &athena.GetQueryExecutionInput{
 				QueryExecutionId: aws.String(query),
@@ -199,6 +329,7 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 	if catalog == "" {
 		catalog = c.connector.config.CatalogOrDefault()
 	}
+	span.SetAttr(athenaAttrCatalog, catalog)
 	queryExecCtx := &athenatypes.QueryExecutionContext{
 		Database: aws.String(c.connector.config.DB),
 		Catalog:  aws.String(catalog),
@@ -254,12 +385,17 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 	obs.Scope().Timer(DriverName + ".query.startqueryexecution").Record(timeStartQueryExecution)
 
 	queryID := *resp.QueryExecutionId
+	span.SetAttr(athenaAttrQueryID, queryID)
 	if pseudoCommand == PCGetQID {
 		return c.getHeaderlessSingleRowResultPage(ctx, queryID)
 	}
 	finalExec, err := c.awaitQueryCompletion(ctx, queryID, wg.Name, query, startOfStartQueryExecution, now)
 	if err != nil {
 		return nil, err
+	}
+	span.SetAttr(athenaAttrStmtType, string(finalExec.StatementType))
+	if finalExec.Statistics != nil && finalExec.Statistics.DataScannedInBytes != nil {
+		span.SetAttr(athenaAttrDataScanned, *finalExec.Statistics.DataScannedInBytes)
 	}
 	rows, err := NewRows(ctx, c.athenaClient, queryID, c.connector.config, obs)
 	if err != nil {

@@ -69,12 +69,9 @@ func noDSNCredentials(t *testing.T) {
 	}
 }
 
-// TestSQLConnector_Connect_DefaultChain is the regression guard for the
-// v1-era AWS_SDK_LOAD_CONFIG gate: with no profile and no static
-// credentials the connector must still resolve through
-// config.LoadDefaultConfig, which always yields a non-nil credentials
-// provider (IMDS / container creds / SSO / shared config), never a
-// credential-less aws.Config.
+// TestSQLConnector_Connect_DefaultChain: no profile, no static credentials
+// -> must still resolve via config.LoadDefaultConfig (IMDS/container/SSO/
+// shared config), never a credential-less aws.Config.
 func TestSQLConnector_Connect_DefaultChain(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	_ = testConf.SetRegion("ap-southeast-1")
@@ -250,7 +247,7 @@ func writeTokenFile(t *testing.T) string {
 
 // TestSQLConnector_WebIdentity is the IRSA/EKS branch: all three DSN keys
 // present must produce an AssumeRoleWithWebIdentity provider. No network
-// call happens — the provider only talks to STS on first Retrieve.
+// call happens; the provider only talks to STS on first Retrieve.
 func TestSQLConnector_WebIdentity(t *testing.T) {
 	noDSNCredentials(t)
 	token := writeTokenFile(t)
@@ -301,7 +298,7 @@ func TestSQLConnector_WebIdentity_PartialConfigIgnored(t *testing.T) {
 }
 
 // An explicit AWSProfile wins over web identity: the profile branch comes
-// first, so LoadDefaultConfig — not stscreds — resolves the credentials.
+// first, so LoadDefaultConfig (not stscreds) resolves the credentials.
 func TestSQLConnector_WebIdentity_ProfileWins(t *testing.T) {
 	noDSNCredentials(t)
 	cfg := NewNoOpsConfig()
@@ -312,4 +309,27 @@ func TestSQLConnector_WebIdentity_ProfileWins(t *testing.T) {
 
 	_, err := NewConnector(cfg).resolveAWSConfig(context.Background())
 	assert.NotNil(t, err, "the nonexistent shared profile must still be what fails")
+}
+
+func TestAthenaServerAddress(t *testing.T) {
+	baseEndpoint := "https://athena.localstack:4566"
+	cases := []struct {
+		name string
+		cfg  aws.Config
+		want string
+	}{
+		{"standard region", aws.Config{Region: "us-west-2"}, "athena.us-west-2.amazonaws.com"},
+		{"china region", aws.Config{Region: "cn-north-1"}, "athena.cn-north-1.amazonaws.com.cn"},
+		{"empty region", aws.Config{}, ""},
+		{"custom endpoint overrides region", aws.Config{Region: "us-west-2", BaseEndpoint: &baseEndpoint}, "athena.localstack:4566"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, athenaServerAddress(tc.cfg))
+		})
+	}
+}
+
+func TestSQLConnector_ServerAddress_EmptyBeforeConnect(t *testing.T) {
+	assert.Equal(t, "", NewConnector(NewNoOpsConfig()).serverAddress())
 }

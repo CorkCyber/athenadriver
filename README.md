@@ -235,6 +235,7 @@ Except the basic features provided by Go `database/sql` like error handling, dat
 - Pseudo commands on the `database/sql` interface: `get_driver_version`, `get_query_id`, `get_query_id_status`, `stop_query_id` [:link:](#pseudo-commands)
 - Built-in `log/slog` logging support [:link:](#enable-driver-logging)
 - Bring-your-own metrics via a 2-method `Scope` interface; ready-made adapters for OpenTelemetry, tally, and statsd [:link:](#enable-metrics)
+- OpenTelemetry-compatible tracing spans, tagged per the database semantic conventions so Sentry/Datadog/etc. recognize them as DB calls [:link:](#enable-tracing)
 
 `athenadriver` can extremely simplify your code. Check [athenareader](https://github.com/CorkCyber/athenadriver/tree/master/athenareader) out as an example and a convenient tool for your Athena query in command line. 
 
@@ -1129,9 +1130,18 @@ Timer`); `Counter` and `Timer` each have 1 (`Inc(int64)`,
 nothing is emitted until you inject one:
 
 ```go
-conf.MetricsEnabled = true               // (already the default)
-ctx = context.WithValue(ctx, drv.MetricsKey, myScope)
+conf.MetricsEnabled = true // (already the default)
+connector := drv.NewConnector(conf).WithScope(myScope)
+db := sql.OpenDB(connector)
 ```
+
+`WithScope` (like `WithTracer` below) applies deterministically to every
+connection this connector produces. A `MetricsKey` ctx-value form also
+exists (passed to `sql.Conn`'s underlying `Connect`), but — unlike
+`TracerKey` — it is not re-checked per query, and which pooled
+connections pick it up depends on `database/sql`'s internal pool
+mechanics; see [Enable Tracing](#enable-tracing) for the full
+explanation. Prefer `WithScope`.
 
 Turn metrics fully off with `conf.MetricsEnabled = false`.
 
@@ -1165,6 +1175,63 @@ ctx = context.WithValue(ctx, drv.MetricsKey,
 
 Metric names all start with `awsathena.` — e.g.
 `awsathena.connector.connect`, `awsathena.query.startqueryexecution`.
+
+### Enable Tracing
+
+The driver starts one span per `QueryContext`/`ExecContext` call through
+two small interfaces (`athenadriver.Tracer`, `Span`) — the same
+bring-your-own-backend shape as `Scope`. Tracing is enabled by default
+but wired to `NoopTracer`, so nothing is emitted until you inject one:
+
+```go
+conf.TracingEnabled = true // (already the default)
+connector := drv.NewConnector(conf).WithTracer(myTracer)
+db := sql.OpenDB(connector)
+```
+
+`WithTracer` is the deterministic wiring: it applies to every connection
+this connector ever produces. A ctx-value form also exists
+(`context.WithValue(ctx, drv.TracerKey, myTracer)`, passed to
+`db.QueryContext`/`db.ExecContext`) for a **per-query override** — a
+request-scoped sampling decision, say — layered on top of whatever
+`WithTracer` set. Don't rely on the ctx-value form as your *only* wiring:
+`database/sql` pools connections, and a connection already established
+before your ctx carries a value will not pick it up (see `WithTracer`'s
+doc comment for why).
+
+Turn tracing fully off with `conf.TracingEnabled = false`.
+
+Every span is tagged as a database client call using [OpenTelemetry's
+database semantic
+conventions](https://opentelemetry.io/docs/specs/semconv/db/database-spans/)
+(`db.system.name=aws.athena`, `db.namespace`, `db.operation.name`,
+`server.address`) plus `athena.query_id` / `athena.workgroup` /
+`athena.catalog` / `athena.statement_type` / `athena.data_scanned_bytes` —
+a backend that understands those conventions (Sentry, Datadog APM,
+Honeycomb, Tempo, ...) renders it as a database call, not a generic span.
+`db.query.text` is deliberately not attached: the DDL-interpolation path
+embeds literal argument values in the query text, and a trace is not
+where those should land by default.
+
+**OpenTelemetry adapter** (`github.com/CorkCyber/athenadriver/scope/otel`
+— the same module as the metrics adapter):
+
+```go
+import (
+    "go.opentelemetry.io/otel"
+    drv       "github.com/CorkCyber/athenadriver/v2/go"
+    otelscope "github.com/CorkCyber/athenadriver/scope/otel"
+)
+
+connector := drv.NewConnector(conf).
+    WithTracer(otelscope.NewTracer(otel.Tracer("athenadriver")))
+```
+
+Rolling your own backend is a couple dozen lines of glue — `Tracer` has
+one method (`StartSpan`), `Span` has three (`SetAttr`, `RecordError`,
+`End`). See `scope/otel`'s `NewTracer`/`tracerAdapter`/`spanAdapter` for a
+reference. Implementations must be safe for concurrent use: one `Tracer`
+is shared across every pooled connection.
 
 ## Limitations of Go/Athena SDK's and `athenadriver`'s Solution
 

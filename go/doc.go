@@ -23,6 +23,7 @@
 //   - Mask columns with specific values
 //   - Database missing value handling
 //   - Read-Only mode
+//   - Bring-your-own metrics and OpenTelemetry-compatible tracing spans
 //
 // Amazon Athena is an interactive query service that lets you use standard
 // SQL to analyze data directly in Amazon S3. You can point Athena at your data
@@ -37,26 +38,41 @@
 // routed to an internal discard handler, so importing this package does not
 // emit anything until you opt in.
 //
-// To capture driver logs, attach a *slog.Logger to the context you hand to
-// db.QueryContext / db.ExecContext under the LoggerKey value:
+// To capture driver logs, prefer SQLConnector.WithLogger, which applies
+// deterministically to every connection a connector produces:
 //
 //	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 //	    Level: slog.LevelInfo,
 //	}))
-//	ctx := context.WithValue(ctx, athenadriver.LoggerKey, logger)
-//	rows, err := db.QueryContext(ctx, "SELECT 1")
+//	connector := athenadriver.NewConnector(conf).WithLogger(logger)
+//	db := sql.OpenDB(connector)
 //
-// The logger is read once per pooled connection (in SQLConnector.Connect),
-// so the first ctx that opens a given conn wins. Subsequent queries on the
-// same pooled conn use that logger. Use separate *sql.DB instances if you
-// need per-query logger swapping.
+// A LoggerKey ctx-value form also exists but is NOT deterministic under a
+// pool: database/sql's background connectionOpener calls Connect with a
+// valueless context.Background(), so whether a pooled connection sees your
+// logger depends on which path built it. Use WithLogger instead.
 //
-// The driver intentionally does not consult slog.Default(). Apps that set a
-// global default handler will not see driver logs spill into it unless they
-// explicitly opt in via LoggerKey above.
+// The driver never consults slog.Default(): a global handler won't see
+// driver logs unless you opt in via WithLogger/LoggerKey.
 //
-// To silence the driver after a logger has been wired in, call
-// Config.LoggingEnabled = false. This short-circuits DriverTracer.Log before
-// attrs are formatted and forces Logger() to return the discard logger,
-// regardless of what was passed via LoggerKey. It is the hard kill-switch.
+// To silence the driver, set Config.LoggingEnabled = false before passing
+// Config to NewConnector (it's copied, so mutating the original afterwards
+// does nothing), or DSN key LoggingEnabled=false. Hard kill-switch, not
+// runtime-mutable; use DriverTracer.SetLogger for that.
+//
+// # Metrics
+//
+// Counters/timers via the 2-method Scope interface, enabled by default but
+// no-op until you supply one, same WithScope/MetricsKey pattern as
+// Logging. Adapters: scope/otel, scope/tally, scope/statsd.
+//
+// # Tracing
+//
+// One span per QueryContext/ExecContext call via Tracer/Span, enabled by
+// default but no-op until you supply one via WithTracer (or TracerKey for
+// a per-query override). Tagged per OTel's database semantic conventions
+// (db.system.name=aws.athena, db.namespace, db.operation.name,
+// server.address) plus athena.* attributes, so any backend that understands
+// those conventions renders it as a DB call. scope/otel.NewTracer bridges
+// to OpenTelemetry.
 package athenadriver

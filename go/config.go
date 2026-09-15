@@ -17,15 +17,12 @@ import (
 )
 
 // Config is the athenadriver Config, a typed view of the DSN passed to
-// sql.Open. All fields are public; assign them directly or use the
-// validating Set* methods (which return errors on bad input).
-//
-// Marshal a Config to a DSN with Stringify(); parse one with NewConfig.
-// Round-trip is lossless for every field encoded into the DSN.
-//
-// Construct an empty Config with NewNoOpsConfig (sane defaults, no
-// credentials), or with NewDefaultConfig if you want to set bucket /
-// region / credentials up front with validation.
+// sql.Open. Fields are public; assign them directly or use the validating
+// Set* methods, which return errors on bad input. Marshal a Config to a
+// DSN with Stringify() and parse one back with NewConfig; round-trip is
+// lossless for every field the DSN encodes. Use NewNoOpsConfig for sane
+// defaults with no credentials, or NewDefaultConfig to set bucket/region/
+// credentials up front with validation.
 type Config struct {
 	// Output bucket. Parsed from / serialized as `s3://Host/Path`. Set
 	// via SetOutputBucket so the s3:// prefix and split are validated.
@@ -67,6 +64,7 @@ type Config struct {
 	ReadOnly       bool
 	LoggingEnabled bool
 	MetricsEnabled bool
+	TracingEnabled bool
 
 	WebIdentityRoleARN         string
 	WebIdentityTokenFile       string
@@ -80,7 +78,7 @@ type Config struct {
 	// MaskedColumns maps a column name to the substitute value the
 	// driver should hand database/sql when the column is read. Keys are
 	// matched case-insensitively (Athena lowercases unquoted identifiers
-	// in ResultSetMetadata) — populate this map via SetMaskedColumnValue
+	// in ResultSetMetadata): populate this map via SetMaskedColumnValue
 	// rather than assigning it directly, so casing is normalized.
 	MaskedColumns map[string]string
 }
@@ -133,7 +131,7 @@ func NewDefaultConfig(outputBucket, region, accessID, secretAccessKey string) (*
 // NewNoOpsConfig builds a Config with no credentials and the defaults
 // that match athenadriver's pre-v2 behavior: default DB, default
 // region, missing-as-empty-string on, WG remote creation allowed,
-// logging and metrics on, AwsDataCatalog catalog.
+// logging, metrics, and tracing on, AwsDataCatalog catalog.
 func NewNoOpsConfig() *Config {
 	return &Config{
 		DB:                   DefaultDBName,
@@ -142,6 +140,7 @@ func NewNoOpsConfig() *Config {
 		WGRemoteCreation:     true,
 		LoggingEnabled:       true,
 		MetricsEnabled:       true,
+		TracingEnabled:       true,
 	}
 }
 
@@ -159,7 +158,7 @@ func NewConfig(dsn string) (*Config, error) {
 	// Reject "s3:/foo" and similar single-slash forms: url.Parse routes the
 	// path into u.Path with Host="", but Stringify can't faithfully emit
 	// them (Go's URL formatter would promote the first path segment into
-	// the host slot on re-parse). A path of "/" alone is fine — it's the
+	// the host slot on re-parse). A path of "/" alone is fine: it's the
 	// canonical trailing slash on a NoOps DSN with no bucket path.
 	if u.Host == "" && strings.TrimLeft(u.Path, "/") != "" {
 		return nil, ErrConfigInvalidConfig
@@ -243,8 +242,8 @@ func (c *Config) fromQuery(q url.Values) error {
 		c.ResultPollMaxInterval = time.Duration(n * float64(time.Second))
 	}
 
-	// missingAsEmptyString, WGRemoteCreation, LoggingEnabled and
-	// MetricsEnabled default to true when the key is absent, matching
+	// missingAsEmptyString, WGRemoteCreation, LoggingEnabled, MetricsEnabled,
+	// and TracingEnabled default to true when the key is absent, matching
 	// NewNoOpsConfig; the remaining booleans default to false.
 	c.MissingAsEmptyString = q.Get("missingAsEmptyString") != "false"
 	c.MissingAsDefault = q.Get("missingAsDefault") == "true"
@@ -254,6 +253,7 @@ func (c *Config) fromQuery(q url.Values) error {
 	c.WGRemoteCreation = q.Get("WGRemoteCreation") != "false"
 	c.LoggingEnabled = q.Get("LoggingEnabled") != "false"
 	c.MetricsEnabled = q.Get("MetricsEnabled") != "false"
+	c.TracingEnabled = q.Get("TracingEnabled") != "false"
 
 	if v := q.Get("DDLQueryTimeout"); v != "" {
 		n, err := strconv.Atoi(v)
@@ -428,13 +428,17 @@ func (c *Config) toQuery() url.Values {
 	// missing-key handling); emit explicitly so DSN round-trip preserves
 	// the field when a caller sets it to false.
 	q.Set("WGRemoteCreation", strconv.FormatBool(c.WGRemoteCreation))
-	// MetricsEnabled and LoggingEnabled default to true; emit only when
-	// explicitly off so the DSN stays terse for the common case.
+	// MetricsEnabled, LoggingEnabled, and TracingEnabled default to true;
+	// emit only when explicitly off so the DSN stays terse for the common
+	// case.
 	if !c.MetricsEnabled {
 		q.Set("MetricsEnabled", "false")
 	}
 	if !c.LoggingEnabled {
 		q.Set("LoggingEnabled", "false")
+	}
+	if !c.TracingEnabled {
+		q.Set("TracingEnabled", "false")
 	}
 
 	if c.ServiceLimit != nil {
@@ -592,12 +596,9 @@ func (c *Config) PollBackoffMultiplier() float64 {
 	return PollBackoffMultiplier
 }
 
-// clone returns a copy deep enough that a Connector can freeze the
-// Config at construction time: pooled Connections all share the
-// connector's Config, so a caller mutating theirs after sql.OpenDB
-// must not race or retroactively change live connections. Workgroup
-// Tags / Config sub-pointers stay shared — the driver treats them as
-// read-only.
+// clone lets a Connector freeze Config at construction: pooled Connections
+// share it, so a caller mutating the original after sql.OpenDB must not
+// affect them. Sub-pointers (Tags, etc.) stay shared and read-only.
 func (c *Config) clone() *Config {
 	dup := *c
 	dup.MaskedColumns = maps.Clone(c.MaskedColumns)

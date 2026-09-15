@@ -5,6 +5,7 @@ package athenadriver
 import (
 	"context"
 	"database/sql/driver"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,29 +30,34 @@ type SQLConnector struct {
 	// individually. nil means "fall back to DSN-driven resolution".
 	awsConfig *aws.Config
 
-	// clientOnce caches the resolved aws.Config and Athena client across
-	// every pooled connection this connector hands out. athena.Client and
-	// aws.CredentialsCache are both safe for concurrent use, so one client
-	// per connector means one credential refresh timer and one
-	// http.Transport (keep-alive/TLS session reuse) for the whole pool
-	// instead of N of each.
+	// clientOnce caches the resolved aws.Config + Athena client across
+	// every pooled connection: one credential refresh timer and one
+	// http.Transport for the whole pool instead of N of each.
 	clientOnce retryOnce[*athena.Client]
 
-	// wgOnce records that the configured workgroup has been confirmed to
-	// exist and be enabled (or was remote-created). The workgroup is fixed
-	// at construction, so only the first query pays for GetWorkGroup — this
-	// single-flights the check so a cold-start burst of N pooled
-	// connections costs one GetWorkGroup instead of N against Athena's low
-	// API quota.
+	// serverAddr is the tracing server.address attribute, set alongside
+	// clientOnce in sharedClient from the same resolved aws.Config (not
+	// re-guessed from Config.Region; see athenaServerAddress).
+	serverAddr atomic.Pointer[string]
+
+	// wgOnce single-flights the workgroup existence/enabled check to once
+	// per connector (workgroup is fixed at construction) instead of once
+	// per pooled connection.
 	wgOnce retryOnce[struct{}]
+
+	// scope/logger/tracer: set via WithScope/WithLogger/WithTracer for a
+	// deterministic value on every connection. The ctx-value alternative
+	// (MetricsKey/LoggerKey/TracerKey) is pool-nondeterministic: Connect runs
+	// with both the caller's ctx and a valueless one from connectionOpener.
+	scope  Scope
+	logger *slog.Logger
+	tracer Tracer
 }
 
-// retryOnce lazily computes and shares a value the first time it's needed,
-// across every caller — but only caches success. A transient failure (a
-// network blip, IMDS not ready yet) is left for the next caller to retry
-// instead of poisoning the cache for the connector's whole lifetime.
-// sync.OnceValue doesn't fit: it caches a failed attempt just as
-// permanently as a successful one.
+// retryOnce lazily computes and shares a value across callers, caching
+// only success. A transient failure (network blip, IMDS not ready) is
+// left for the next caller to retry; sync.OnceValue caches failure too
+// permanently for this.
 type retryOnce[T any] struct {
 	mu    sync.Mutex
 	value atomic.Pointer[T]
@@ -85,25 +91,47 @@ func (o *retryOnce[T]) done() bool {
 }
 
 // NewConnector returns a SQLConnector for the given DSN-parsed Config.
-// The Config is copied at construction: mutating cfg afterwards does not
-// affect (or race with) connections the connector produces. Callers that
-// need to drive credential resolution themselves should chain
-// WithAWSConfig.
+// The Config is copied at construction, so mutating cfg afterwards does not
+// affect (or race with) connections the connector produces. Callers driving
+// credential resolution themselves should chain WithAWSConfig.
 func NewConnector(cfg *Config) *SQLConnector {
 	return &SQLConnector{config: cfg.clone()}
 }
 
-// WithAWSConfig injects a caller-built aws.Config. When set, Connect uses
-// it verbatim instead of synthesizing one from DSN keys. Returns the same
-// connector for chaining.
-//
-// Must be called before the connector's first Connect — i.e. immediately
-// after NewConnector, while the connector is not yet in use. The Athena
-// client is built once and cached for the connector's lifetime, so a call
-// after the first successful Connect has no effect and races any concurrent
-// Connect.
+// WithAWSConfig injects a caller-built aws.Config, used verbatim instead of
+// synthesizing one from DSN keys; returns the same connector for chaining.
+// Call before the first Connect (right after NewConnector): the Athena
+// client is built once and cached, so a later call has no effect and races
+// a concurrent Connect.
 func (c *SQLConnector) WithAWSConfig(awsCfg aws.Config) *SQLConnector {
 	c.awsConfig = &awsCfg
+	return c
+}
+
+// WithScope sets the metrics Scope every connection this connector produces
+// will use (the deterministic fix for MetricsKey's pool nondeterminism; see
+// the scope field comment). Call before the first Connect: a later call
+// races a concurrent Connect and only partially applies, since already-open
+// connections keep the old value.
+func (c *SQLConnector) WithScope(scope Scope) *SQLConnector {
+	c.scope = scope
+	return c
+}
+
+// WithLogger sets the slog.Logger every connection this connector
+// produces will use. The deterministic alternative to LoggerKey. Same
+// before-first-Connect requirement as WithScope.
+func (c *SQLConnector) WithLogger(logger *slog.Logger) *SQLConnector {
+	c.logger = logger
+	return c
+}
+
+// WithTracer sets the span Tracer every connection this connector
+// produces will use. Same before-first-Connect requirement as WithScope.
+// TracerKey on a per-query ctx is a separate, reliable per-query override;
+// see TracerKey's doc comment.
+func (c *SQLConnector) WithTracer(tracer Tracer) *SQLConnector {
+	c.tracer = tracer
 	return c
 }
 
@@ -147,7 +175,7 @@ func (c *SQLConnector) resolveAWSConfig(ctx context.Context) (aws.Config, error)
 		))
 	}
 	// LoadDefaultConfig always reads ~/.aws/config and ~/.aws/credentials and
-	// resolves env vars, SSO, container creds / IRSA and IMDS — there is no
+	// resolves env vars, SSO, container creds / IRSA, and IMDS. There is no
 	// v1-style AWS_SDK_LOAD_CONFIG gate in v2.
 	base, err := config.LoadDefaultConfig(ctx, opts...)
 	if err != nil || !webIdentity {
@@ -175,8 +203,47 @@ func (c *SQLConnector) sharedClient(ctx context.Context) (*athena.Client, error)
 		if err != nil {
 			return nil, err
 		}
+		addr := athenaServerAddress(awsCfg)
+		c.serverAddr.Store(&addr)
 		return athena.NewFromConfig(awsCfg), nil
 	})
+}
+
+// athenaServerAddress derives server.address from the SAME resolved
+// aws.Config the Athena client uses, not re-guessed from Config.Region,
+// which breaks for a custom BaseEndpoint or the China partition (both
+// handled below). GovCloud (us-gov-*) needs neither special case: its
+// Athena endpoints use the same amazonaws.com suffix as the commercial
+// partition (confirmed against the SDK's own endpoint rules). Not
+// handled: the isolated partitions (aws-iso/us-iso-*, aws-iso-b/
+// us-isob-*, aws-iso-e, aws-iso-f), which each use a distinct non-AWS
+// TLD (c2s.ic.gov, sc2s.sgov.gov, cloud.adc-e.uk, csp.hci.ic.gov) and
+// get the wrong suffix here; niche, use WithAWSConfig + explicit
+// BaseEndpoint there.
+func athenaServerAddress(awsCfg aws.Config) string {
+	if awsCfg.BaseEndpoint != nil {
+		addr := *awsCfg.BaseEndpoint
+		addr = strings.TrimPrefix(addr, "https://")
+		addr = strings.TrimPrefix(addr, "http://")
+		return addr
+	}
+	if awsCfg.Region == "" {
+		return ""
+	}
+	if strings.HasPrefix(awsCfg.Region, "cn-") {
+		return "athena." + awsCfg.Region + ".amazonaws.com.cn"
+	}
+	return "athena." + awsCfg.Region + ".amazonaws.com"
+}
+
+// serverAddress returns the resolved server.address attribute for tracing.
+// Empty until the first successful sharedClient call; Connect requires
+// that call before a Connection exists, so every query path has it.
+func (c *SQLConnector) serverAddress() string {
+	if p := c.serverAddr.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 // NoopsSQLConnector is to create a noops SQLConnector.
@@ -203,37 +270,47 @@ func (c *SQLConnector) Driver() driver.Driver {
 }
 
 // Connect returns a connection backed by the connector's shared Athena
-// client. The client (and the aws.Config behind it) is built on the first
-// Connect and reused by every later one, so a connection pool shares one
-// credential cache and one HTTP transport.
+// client: built on the first Connect, reused by every later one, so a
+// connection pool shares one credential cache and one HTTP transport.
 //
 // Credential resolution follows this precedence:
 //
-//  1. WithAWSConfig — caller-supplied aws.Config used verbatim.
-//  2. Config.WebIdentityRoleARN + WebIdentityTokenFile — explicit
+//  1. WithAWSConfig: caller-supplied aws.Config used verbatim.
+//  2. Config.WebIdentityRoleARN + WebIdentityTokenFile: explicit
 //     AssumeRoleWithWebIdentity (only when AWSProfile is unset).
 //  3. DSN-supplied static access key / secret / session token (only when
 //     Config.AccessID itself is set to something other than DummyAccessID
-//     and AWSProfile is unset — environment-only credentials and the
+//     and AWSProfile is unset; environment-only credentials and the
 //     DummyAccessID sentinel are left to the SDK chain).
-//  4. config.LoadDefaultConfig — the standard aws-sdk-go-v2 chain:
+//  4. config.LoadDefaultConfig: the standard aws-sdk-go-v2 chain,
 //     ~/.aws/config and ~/.aws/credentials (honoring Config.AWSProfile
 //     when set), env vars, SSO, container creds / IRSA, and IMDS.
 //
-// Cases 2 and 3 are layered onto the LoadDefaultConfig result (case 2's
-// STS client is itself built from it), so env-driven SDK settings
-// (endpoint URL, retry mode, FIPS, CA bundle) apply identically on every
-// path.
+// Cases 2 and 3 layer onto the LoadDefaultConfig result, so env-driven SDK
+// settings (endpoint URL, retry mode, FIPS, CA bundle) apply on every path.
 func (c *SQLConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	now := time.Now()
-	// tracer is per-connection so concurrent Connect() calls do not race
-	// mutating a shared field on the connector.
+	// Per-connection, so concurrent Connect() calls don't race a shared
+	// connector field.
 	tracer := NewObservability(c.config, nil, nil)
-	if metrics, ok := ctx.Value(MetricsKey).(Scope); ok {
+	// WithScope/WithLogger/WithTracer win when set (deterministic on every
+	// connection). ctx-value fallback is pool-nondeterministic: database/sql's
+	// background connectionOpener calls Connect with a valueless
+	// context.Background(), so pool pressure decides who sees it.
+	if c.scope != nil {
+		tracer.SetScope(c.scope)
+	} else if metrics, ok := ctx.Value(MetricsKey).(Scope); ok {
 		tracer.SetScope(metrics)
 	}
-	if logger, ok := ctx.Value(LoggerKey).(*slog.Logger); ok {
+	if c.logger != nil {
+		tracer.SetLogger(c.logger)
+	} else if logger, ok := ctx.Value(LoggerKey).(*slog.Logger); ok {
 		tracer.SetLogger(logger)
+	}
+	if c.tracer != nil {
+		tracer.SetTracer(c.tracer)
+	} else if spans, ok := ctx.Value(TracerKey).(Tracer); ok {
+		tracer.SetTracer(spans)
 	}
 
 	athenaClient, err := c.sharedClient(ctx)

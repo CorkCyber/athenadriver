@@ -176,7 +176,7 @@ func newMockAthenaClient() *mockAthenaClient {
 			"SELECTQueryContext_OK_QID":            pingPage(),
 			"00000000-0000-0000-0000-000000000000": pingPage(),
 			"pc:get_query_id":                      pingPage(),
-			"FAILED_AFTER_GETQID": singlePage(buildPage(
+			"FAILED_AFTER_GETQID x": singlePage(buildPage(
 				one(col("c1", "integer")),
 				[]athenatypes.Row{missingDataRow(one(col("c1", "integer")))},
 				1024)),
@@ -253,23 +253,24 @@ func (m *mockAthenaClient) GetWorkGroup(_ context.Context, _ *athena.GetWorkGrou
 // successful StartQueryExecution; the body of the test is then driven by
 // the matching qidStates entry in GetQueryExecution.
 var queryToQID = map[string]string{
-	"select 1":                               "PING_OK_QID",
-	"SELECTExecContext_OK":                   "SELECTExecContext_OK_QID",
-	"SELECTQueryContext_OK":                  "SELECTQueryContext_OK_QID",
-	"SELECTQueryContext_'OK'":                "SELECTQueryContext_OK_QID",
-	"SELECTQueryContext_?":                   "SELECTQueryContext_OK_QID",
-	"SELECTQueryContext_CANCEL_OK":           "SELECTQueryContext_CANCEL_OK_QID",
-	"select ?":                               "PING_OK_QID",
-	"select ? , 'what?'":                     "PING_OK_QID",
-	"alter table t set location 'x'":         "PING_OK_QID",
-	"SELECTQueryContext_AWS_CANCEL":          "SELECTQueryContext_AWS_CANCEL_QID",
-	"SELECTQueryContext_AWS_FAIL":            "SELECTQueryContext_AWS_FAIL_QID",
-	"SELECTQueryContext_AWS_FAIL_STRUCTURED": "SELECTQueryContext_AWS_FAIL_STRUCTURED_QID",
-	"SELECTQueryContext_CANCEL_FAIL":         "SELECTQueryContext_CANCEL_FAIL_QID",
-	"SELECTQueryContext_TIMEOUT":             "SELECTQueryContext_TIMEOUT_QID",
-	"When_StartQueryExecution_Succeed_but_GetQueryExecutionWithContext_return_nil_and_error": "When_StartQueryExecution_Succeed_but_GetQueryExecutionWithContext_return_nil_and_error_QID",
-	"StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateCancelled":       "QueryExecutionStateCancelled_QID",
-	"StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateFailed":          "QueryExecutionStateFailed_QID",
+	"select 1":                                 "PING_OK_QID",
+	"SELECTExecContext_OK x":                   "SELECTExecContext_OK_QID",
+	"SELECTQueryContext_OK x":                  "SELECTQueryContext_OK_QID",
+	"SELECTQueryContext_'OK' x":                "SELECTQueryContext_OK_QID",
+	"SELECTQueryContext_? x":                   "SELECTQueryContext_OK_QID",
+	"SELECTQueryContext_CANCEL_OK x":           "SELECTQueryContext_CANCEL_OK_QID",
+	"select ?":                                 "PING_OK_QID",
+	"select ? , 'what?'":                       "PING_OK_QID",
+	"SELECT(1)":                                "PING_OK_QID",
+	"alter table t set location 'x'":           "PING_OK_QID",
+	"SELECTQueryContext_AWS_CANCEL x":          "SELECTQueryContext_AWS_CANCEL_QID",
+	"SELECTQueryContext_AWS_FAIL x":            "SELECTQueryContext_AWS_FAIL_QID",
+	"SELECTQueryContext_AWS_FAIL_STRUCTURED x": "SELECTQueryContext_AWS_FAIL_STRUCTURED_QID",
+	"SELECTQueryContext_CANCEL_FAIL x":         "SELECTQueryContext_CANCEL_FAIL_QID",
+	"SELECTQueryContext_TIMEOUT x":             "SELECTQueryContext_TIMEOUT_QID",
+	"When_StartQueryExecution_Succeed_but_GetQueryExecutionWithContext_return_nil_and_error x": "When_StartQueryExecution_Succeed_but_GetQueryExecutionWithContext_return_nil_and_error_QID",
+	"StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateCancelled x":       "QueryExecutionStateCancelled_QID",
+	"StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateFailed x":          "QueryExecutionStateFailed_QID",
 }
 
 func (m *mockAthenaClient) StartQueryExecution(_ context.Context, s *athena.StartQueryExecutionInput, _ ...func(options *athena.Options)) (*athena.StartQueryExecutionOutput, error) {
@@ -286,12 +287,12 @@ func (m *mockAthenaClient) StartQueryExecution(_ context.Context, s *athena.Star
 		return &athena.StartQueryExecutionOutput{QueryExecutionId: &qid}, nil
 	}
 	switch q {
-	case "StartQueryExecution_nil_error":
+	case "StartQueryExecution_nil_error x":
 		return nil, ErrTestMockGeneric
-	case "FAILED_AFTER_GETQID":
+	case "FAILED_AFTER_GETQID x":
 		qid := "FAILED_AFTER_GETQID_123"
 		return &athena.StartQueryExecutionOutput{QueryExecutionId: &qid}, fmt.Errorf("FAILED_AFTER_GETQID_FAILED")
-	case "FAILED_AFTER_GETQID2":
+	case "FAILED_AFTER_GETQID2 x":
 		qid := "FAILED_AFTER_GETQID_123"
 		smithyErr := &smithyhttp.ResponseError{Err: fmt.Errorf("FAILED_AFTER_GETQID_FAILED")}
 		return &athena.StartQueryExecutionOutput{QueryExecutionId: &qid},

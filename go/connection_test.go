@@ -146,10 +146,8 @@ func TestConnection_CloseRace(t *testing.T) {
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := 0; i < 200; i++ {
+	wg.Go(func() {
+		for range 200 {
 			// Errors are the mock's business; what matters here is that a
 			// concurrent Close neither panics nor races. ErrBadConn after
 			// Close is asserted deterministically below.
@@ -158,7 +156,7 @@ func TestConnection_CloseRace(t *testing.T) {
 				rows.Close()
 			}
 		}
-	}()
+	})
 	time.Sleep(time.Millisecond)
 	assert.NoError(t, c.Close())
 	wg.Wait()
@@ -979,13 +977,11 @@ func TestResolveWorkgroup_ConcurrentHammer(t *testing.T) {
 	hammer := func() {
 		var wg sync.WaitGroup
 		for range n {
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
+			wg.Go(func() {
 				w, err := c.resolveWorkgroup(context.Background())
 				assert.NoError(t, err)
 				assert.Equal(t, "henry_wu", w.Name)
-			}()
+			})
 		}
 		wg.Wait()
 	}
@@ -1278,9 +1274,7 @@ func TestResolveWorkgroup_ConcurrentQueryContext(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range n {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			// A fresh Connection per goroutine, same connector and client —
 			// exactly what a database/sql pool cold start looks like.
 			c := &Connection{
@@ -1291,7 +1285,7 @@ func TestResolveWorkgroup_ConcurrentQueryContext(t *testing.T) {
 			_, err := c.QueryContext(context.Background(), "SELECTQueryContext_OK", nil)
 			assert.ErrorIs(t, err, ErrTestMockGeneric,
 				"every caller must get past workgroup resolution")
-		}()
+		})
 	}
 	wg.Wait()
 

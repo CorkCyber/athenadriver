@@ -50,7 +50,7 @@ func udpSink(t *testing.T, prefix string) (statsd.Statter, func(want int) []stri
 			if err != nil {
 				break
 			}
-			for _, l := range strings.Split(strings.TrimRight(string(buf[:n]), "\n"), "\n") {
+			for l := range strings.SplitSeq(strings.TrimRight(string(buf[:n]), "\n"), "\n") {
 				if l != "" {
 					lines = append(lines, l)
 				}
@@ -62,7 +62,7 @@ func udpSink(t *testing.T, prefix string) (statsd.Statter, func(want int) []stri
 }
 
 // readMaybe drains packets until a short deadline, returning whatever
-// arrives — used to assert non-emission.
+// arrives; used to assert non-emission.
 func readMaybe(t *testing.T, pc net.PacketConn, budget time.Duration) []string {
 	t.Helper()
 	if err := pc.SetReadDeadline(time.Now().Add(budget)); err != nil {
@@ -75,7 +75,7 @@ func readMaybe(t *testing.T, pc net.PacketConn, budget time.Duration) []string {
 		if err != nil {
 			return lines
 		}
-		for _, l := range strings.Split(strings.TrimRight(string(buf[:n]), "\n"), "\n") {
+		for l := range strings.SplitSeq(strings.TrimRight(string(buf[:n]), "\n"), "\n") {
 			if l != "" {
 				lines = append(lines, l)
 			}
@@ -120,7 +120,7 @@ func TestAdapterSampleRate1(t *testing.T) {
 	}
 }
 
-// TestAdapterSampleRateZero — rate=0 means "never sample". The adapter must
+// TestAdapterSampleRateZero: rate=0 means "never sample". The adapter must
 // not silently invert the meaning and always emit.
 func TestAdapterSampleRateZero(t *testing.T) {
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
@@ -136,8 +136,8 @@ func TestAdapterSampleRateZero(t *testing.T) {
 	defer statter.Close()
 
 	scope := NewWithRate(statter, 0)
-	// 200 shots at rate 0 — statsd MUST drop them all.
-	for i := 0; i < 200; i++ {
+	// 200 shots at rate 0: statsd must drop them all.
+	for range 200 {
 		scope.Counter("k").Inc(1)
 		scope.Timer("t").Record(time.Microsecond)
 	}

@@ -1,6 +1,6 @@
 module github.com/CorkCyber/athenadriver/athenareader
 
-go 1.24
+go 1.26
 
 require (
 	github.com/CorkCyber/athenadriver/v2 v2.0.0

@@ -304,7 +304,7 @@ func parseTags(s string) *WGTags {
 	if s == "" {
 		return t
 	}
-	for _, kv := range strings.Split(strings.TrimPrefix(s, "|"), "|") {
+	for kv := range strings.SplitSeq(strings.TrimPrefix(s, "|"), "|") {
 		parts := strings.SplitN(kv, "`", 2)
 		if len(parts) == 2 {
 			t.AddTag(parts[0], parts[1])

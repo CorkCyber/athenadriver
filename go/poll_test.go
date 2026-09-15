@@ -84,7 +84,7 @@ func newPollTestConn(mut ...func(*Config, *mockAthenaClient)) (*Connection, *moc
 // StopQueryExecution that runs when the caller's ctx is already cancelled
 // must receive a LIVE context (context.WithoutCancel) carrying its own
 // deadline, otherwise the cancellation would cancel the very call meant to
-// stop the server-side query — and the caller keeps getting billed.
+// stop the server-side query, and the caller keeps getting billed.
 func TestStopQueryOnCancel_CleanupCtxIsDetached(t *testing.T) {
 	t.Parallel()
 	c, nm := newPollTestConn()
@@ -102,7 +102,7 @@ func TestStopQueryOnCancel_CleanupCtxIsDetached(t *testing.T) {
 }
 
 // TestStopQueryOnCancel_HangingStopIsBounded: a StopQueryExecution that never
-// answers must not hang the caller forever — the cleanup timeout caps it.
+// answers must not hang the caller forever: the cleanup timeout caps it.
 func TestStopQueryOnCancel_HangingStopIsBounded(t *testing.T) {
 	t.Parallel()
 	c, _ := newPollTestConn(func(_ *Config, nm *mockAthenaClient) {
@@ -122,7 +122,7 @@ func TestStopQueryOnCancel_HangingStopIsBounded(t *testing.T) {
 
 // TestAwaitQueryCompletion_BackoffGrowsAndClamps exercises the poll-interval
 // arithmetic: successive waits are multiplied, then pinned at the configured
-// maximum. Timing tolerances are deliberately wide — this asserts the shape
+// maximum. Timing tolerances are deliberately wide: this asserts the shape
 // of the sequence, not exact scheduler latency.
 func TestAwaitQueryCompletion_BackoffGrowsAndClamps(t *testing.T) {
 	t.Parallel()
@@ -198,8 +198,8 @@ func TestAwaitQueryCompletion_CancelDuringBackoffWait(t *testing.T) {
 
 // TestAwaitQueryCompletion_AthenaCancelledIsNotCtxCanceled: a query Athena
 // cancelled server-side (workgroup byte cutoff, admin stop, service abort)
-// must NOT masquerade as context.Canceled — callers key retry/alert decisions
-// off that sentinel — and must carry Athena's StateChangeReason.
+// must NOT masquerade as context.Canceled (callers key retry/alert decisions
+// off that sentinel), and must carry Athena's StateChangeReason.
 func TestAwaitQueryCompletion_AthenaCancelledIsNotCtxCanceled(t *testing.T) {
 	t.Parallel()
 	const reason = "Query exhausted resources at this scale factor"
@@ -246,7 +246,7 @@ func TestAwaitQueryCompletion_CancelRacesTimerFire(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		for i := 0; i < 200; i++ {
+		for i := range 200 {
 			ctx, cancel := context.WithCancel(context.Background())
 			c, _ := newPollTestConn(func(cfg *Config, nm *mockAthenaClient) {
 				cfg.ResultPollInterval = pollInterval

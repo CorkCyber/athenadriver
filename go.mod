@@ -1,6 +1,6 @@
 module github.com/CorkCyber/athenadriver/v2
 
-go 1.24
+go 1.26
 
 require (
 	github.com/DATA-DOG/go-sqlmock v1.4.1

@@ -83,7 +83,7 @@ Ten breaking changes, batched into one release.
 | 2 | `aws-sdk-go` → `aws-sdk-go-v2` | Update AWS type imports + pointer helpers. |
 | 3 | `Config` is a typed struct | Assign fields; a few validating setters remain. |
 | 4 | Logger: `*zap.Logger` → `*slog.Logger` | Inject `*slog.Logger` via `LoggerKey` ctx. |
-| 5 | Go floor: 1.13 → 1.22 | Bump toolchain. |
+| 5 | Go floor: 1.13 → 1.26 | Bump toolchain. |
 | 6 | `athenareader/` is a separate module | Update its import path if you used it as a library. |
 | 7 | `ServiceLimitOverride` is a typed struct | Assign fields. |
 | 8 | Observability + WG helper constructors collapsed | One constructor / struct literal. |
@@ -144,7 +144,7 @@ ctx = context.WithValue(ctx, drv.LoggerKey, slog.New(handler))
 
 `DebugLevel` / `InfoLevel` / `WarnLevel` / `ErrorLevel` now alias `slog.Level`. `obs.Log(drv.ErrorLevel, "...")` call sites keep working.
 
-### 5. Go 1.22 floor
+### 5. Go 1.26 floor
 
 Uses `log/slog`, `reflect.TypeFor[T]()`, and `range` over integers.
 
@@ -266,7 +266,7 @@ For more details on `athenadriver`'s support on AWS credentials & S3 query resul
 
 ### Installation
 
-`athenadriver` requires Go 1.22+. Add the driver to your module:
+`athenadriver` requires Go 1.26+. Add the driver to your module:
 
 ```bash
 go get github.com/CorkCyber/athenadriver/v2/go
@@ -1109,7 +1109,7 @@ need per-query logger swapping, use separate `*sql.DB` instances.
 | Goal | How |
 | --- | --- |
 | Default (no logs at all) | Do nothing. The driver wires `slog.New(slog.NewTextHandler(io.Discard, nil))` automatically. |
-| Pass a no-op handler explicitly | `slog.New(slog.DiscardHandler)` (Go 1.24+) or `slog.New(slog.NewTextHandler(io.Discard, nil))`. |
+| Pass a no-op handler explicitly | `slog.New(slog.DiscardHandler)` or `slog.New(slog.NewTextHandler(io.Discard, nil))`. |
 | Hard kill-switch | `conf.LoggingEnabled = false`. Short-circuits inside `DriverTracer.Log` before attrs are formatted; `DriverTracer.Logger()` returns the discard logger regardless of any context-supplied logger. |
 
 Sample output (with an `slog.NewJSONHandler` and Info-level threshold):

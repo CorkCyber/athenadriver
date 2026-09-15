@@ -89,10 +89,10 @@ func TestAdapterConcurrentLookup(t *testing.T) {
 	const perGoroutine = 128
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
-	for g := 0; g < goroutines; g++ {
+	for g := range goroutines {
 		go func(id int) {
 			defer wg.Done()
-			for i := 0; i < perGoroutine; i++ {
+			for i := range perGoroutine {
 				name := fmt.Sprintf("k%d", (id+i)%4) // 4 shared names
 				s.Counter(name).Inc(1)
 				s.Timer(name).Record(time.Microsecond)

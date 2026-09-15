@@ -70,7 +70,7 @@ func colInfo(name, typ string) athenatypes.ColumnInfo {
 func TestRows_ColumnTypeScanType(t *testing.T) {
 	// Known type -> concrete Go type.
 	r := newRowsWithMetadata("q", nil, []athenatypes.ColumnInfo{colInfo("c", "integer")})
-	assert.Equal(t, reflect.TypeOf(int32(0)), r.ColumnTypeScanType(0))
+	assert.Equal(t, reflect.TypeFor[int32](), r.ColumnTypeScanType(0))
 
 	// Unknown type -> scanTypeUnknown.
 	r = newRowsWithMetadata("q", nil, []athenatypes.ColumnInfo{colInfo("c", "no_such_type")})

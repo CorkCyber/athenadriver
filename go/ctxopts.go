@@ -78,12 +78,9 @@ func resultReuseFromContext(ctx context.Context) *athenatypes.ResultReuseConfigu
 	if !ok || v <= 0 {
 		return nil
 	}
-	minutes := max(int32(v/time.Minute), 1)
 	// 10080 (7 days) is Athena's documented maximum for
 	// ResultReuseByAgeConfiguration.MaxAgeInMinutes; 60 is merely its default.
-	if minutes > 10080 {
-		minutes = 10080
-	}
+	minutes := min(max(int32(v/time.Minute), 1), 10080)
 	return &athenatypes.ResultReuseConfiguration{
 		ResultReuseByAgeConfiguration: &athenatypes.ResultReuseByAgeConfiguration{
 			Enabled:         true,

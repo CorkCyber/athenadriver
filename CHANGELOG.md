@@ -23,7 +23,7 @@ Full migration steps live in the [README v2 migration guide](README.md#v200-migr
 2. **AWS SDK v1 → v2** — types move to `aws-sdk-go-v2/service/athena/types`; credentials flow through `aws.Config`. DSN keys unchanged.
 3. **`Config` is a typed struct** — assign fields directly. Validating setters kept: `SetOutputBucket`, `SetRegion`, `SetAccessID`, `SetSecretAccessKey`, `SetWorkGroup`.
 4. **Logger** — `*zap.Logger` → `*slog.Logger`. Silent runtime break for callers that inject via `LoggerKey` ctx.
-5. **Go floor** — 1.13 → 1.24.
+5. **Go floor** — 1.13 → 1.26.
 6. **`athenareader/` is a separate module** — `github.com/CorkCyber/athenadriver/athenareader`.
 7. **`ServiceLimitOverride` is a typed struct** — assign `DDLQueryTimeout` / `DMLQueryTimeout` fields. Setters + `ErrServiceLimitOverride` removed.
 8. **Constructors collapsed** — `NewDefaultObservability`, `NewNoOpsObservability`, `NewWGConfig`, `NewNonOpsRows` removed. Use `NewObservability(cfg, nil, nil)` and struct literals.
@@ -96,8 +96,8 @@ Internal only. See "Breaking" above for user-visible v1 → v2 changes.
 - Driver no longer pulls `go.uber.org/zap`, `zapcore`, or `go.uber.org/multierr`. Only remaining uber transitive: `go.uber.org/atomic` (required by `tally/v4`).
 - `(*Rows).fetchNextPage` uses `athena.NewGetQueryResultsPaginator`; hand-rolled `NextToken` loop gone.
 - Vendored `aws-sdk-go` v1 `awsutil.Prettify` replaced with a purpose-built formatter for `athena/types.WorkGroupConfiguration` and its nested types.
-- CI replaced `.travis.yml` with `.github/workflows/ci.yml`: `go vet`, `gofmt -s`, `go test -race` across Go 1.22 / 1.23 / 1.24, Codecov, athenareader CLI build.
-- `go.mod` `go` directive relaxed from `1.26.3` (Grafana plugin default) to `1.22`.
+- CI replaced `.travis.yml` with `.github/workflows/ci.yml`: `go vet`, `gofmt -s`, `go test -race` across Go 1.26, Codecov, athenareader CLI build.
+- `go.mod` `go` directive relaxed from `1.26.3` (Grafana plugin default) to `1.26`.
 - `examples/metrics/main.go` rewritten against the new `Scope` interface, using the OpenTelemetry adapter (`scope/otel`) as the reference implementation; `scope/tally` and `scope/statsd` are noted as drop-in alternatives.
 - README: "About this fork" section, badges refreshed, FOSSA badge dropped.
 

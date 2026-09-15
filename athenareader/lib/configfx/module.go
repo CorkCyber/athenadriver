@@ -6,26 +6,14 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"io/ioutil"
 	"os"
 	"os/user"
 	"path/filepath"
 	"strings"
 
 	drv "github.com/CorkCyber/athenadriver/v2/go"
-	"go.uber.org/config"
-	"go.uber.org/fx"
+	"gopkg.in/yaml.v3"
 )
-
-// Module is to provide dependency of Configuration to main app
-var Module = fx.Provide(new)
-
-// Params defines the dependencies or inputs
-type Params struct {
-	fx.In
-
-	LC fx.Lifecycle
-}
 
 // ReaderOutputConfig is to represent the output section of configuration file
 type ReaderOutputConfig struct {
@@ -67,35 +55,38 @@ type AthenaDriverConfig struct {
 	DrvConfig *drv.Config
 }
 
-// Result defines output
-type Result struct {
-	fx.Out
-
-	// MyConfig is the current AthenaDriver Config
-	MyConfig AthenaDriverConfig
+// fileConfig mirrors the on-disk athenareader.config layout.
+type fileConfig struct {
+	Athenareader struct {
+		Output ReaderOutputConfig `yaml:"output"`
+		Input  ReaderInputConfig  `yaml:"input"`
+	} `yaml:"athenareader"`
 }
 
 func init() {
 	setUpFlagUsage(context.Background())
 }
 
-func new(p Params) (Result, error) {
+// loadConfigFile parses an athenareader.config YAML file. A missing or
+// malformed file is an error, never a silently zero-valued config.
+func loadConfigFile(path string) (ReaderOutputConfig, ReaderInputConfig, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ReaderOutputConfig{}, ReaderInputConfig{}, err
+	}
+	var fc fileConfig
+	if err := yaml.Unmarshal(b, &fc); err != nil {
+		return ReaderOutputConfig{}, ReaderInputConfig{}, fmt.Errorf("parsing %s: %w", path, err)
+	}
+	return fc.Athenareader.Output, fc.Athenareader.Input, nil
+}
+
+// New parses the command line flags and the athenareader.config file into
+// the CLI's configuration.
+func New() (AthenaDriverConfig, error) {
 	var mc = AthenaDriverConfig{
 		QueryString: make([]string, 0),
 	}
-	var (
-		provider *config.YAML
-		err      error
-	)
-
-	p.LC.Append(fx.Hook{
-		OnStart: func(ctx context.Context) error {
-			return nil
-		},
-		OnStop: func(ctx context.Context) error {
-			return nil
-		},
-	})
 
 	var bucket = flag.String("b", defaultOutputBucket, "Athena resultset output bucket")
 	var database = flag.String("d", "default", "The database you want to query")
@@ -109,28 +100,23 @@ func new(p Params) (Result, error) {
 	var fastFail = flag.Bool("f", true, "fast fail when where are multiple queries")
 
 	flag.Parse()
-	switch {
-	case *versionFlag:
+	if *versionFlag {
 		println("Current build version: v" + drv.DriverVersion())
 		os.Exit(0)
-		return Result{}, fmt.Errorf("no")
 	}
 
 	cfgPath, err := resolveConfigFile()
 	if err != nil {
-		return Result{}, err
+		return mc, err
 	}
-	provider, err = config.NewYAML(config.File(cfgPath))
+	mc.OutputConfig, mc.InputConfig, err = loadConfigFile(cfgPath)
 	if err != nil {
-		return Result{}, err
+		return mc, err
 	}
-
-	provider.Get("athenareader.output").Populate(&mc.OutputConfig)
-	provider.Get("athenareader.input").Populate(&mc.InputConfig)
 
 	filePath := expand(*query)
 	if _, err := os.Stat(filePath); err == nil {
-		b, err := ioutil.ReadFile(filePath)
+		b, err := os.ReadFile(filePath)
 		if err == nil {
 			mc.QueryString = strings.Split(string(b), "\n\n") // convert content to a '[]string'
 		}
@@ -138,13 +124,8 @@ func new(p Params) (Result, error) {
 		mc.QueryString = append(mc.QueryString, *query)
 	}
 
-	mc.DrvConfig, err = drv.NewDefaultConfig(mc.InputConfig.Bucket, mc.InputConfig.Region, defaultAccessID, defaultSecretAccessKey)
-	if err != nil {
-		return Result{}, err
-	}
 	if isFlagPassed("b") {
 		mc.InputConfig.Bucket = *bucket
-		mc.DrvConfig.SetOutputBucket(mc.InputConfig.Bucket)
 	}
 	if isFlagPassed("d") {
 		mc.InputConfig.Database = *database
@@ -169,6 +150,18 @@ func new(p Params) (Result, error) {
 	if isFlagPassed("o") {
 		mc.OutputConfig.Render = *format
 	}
+
+	// No credentials here: leaving AccessID empty makes the driver use the
+	// default AWS credential chain (SSO, ~/.aws, IRSA, IMDS).
+	mc.DrvConfig = drv.NewNoOpsConfig()
+	if err := mc.DrvConfig.SetOutputBucket(mc.InputConfig.Bucket); err != nil {
+		return mc, err
+	}
+	if mc.InputConfig.Region != "" {
+		if err := mc.DrvConfig.SetRegion(mc.InputConfig.Region); err != nil {
+			return mc, err
+		}
+	}
 	if mc.OutputConfig.Moneywise {
 		mc.DrvConfig.MoneyWise = true
 	}
@@ -176,12 +169,7 @@ func new(p Params) (Result, error) {
 	if !mc.InputConfig.Admin {
 		mc.DrvConfig.ReadOnly = true
 	}
-	if err != nil {
-		return Result{}, err
-	}
-	return Result{
-		MyConfig: mc,
-	}, nil
+	return mc, nil
 }
 
 func expand(path string) string {

@@ -2,11 +2,7 @@
 
 package configfx
 
-// Built-in default placeholders for the `-b` flag and AWS credential
-// chain. Replace via athenareader.config or environment in normal use;
-// the dummies here just make the CLI start when nothing is configured.
-const (
-	defaultOutputBucket    = "s3://qr-athena-query-result-prod/Henry/"
-	defaultAccessID        = "dummy"
-	defaultSecretAccessKey = "dummy"
-)
+// defaultOutputBucket is the built-in default for the `-b` flag; replace
+// it via athenareader.config in normal use. Credentials come from the AWS
+// default credential chain, never from a built-in placeholder.
+const defaultOutputBucket = "s3://qr-athena-query-result-prod/Henry/"

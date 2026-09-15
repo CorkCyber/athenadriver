@@ -7,27 +7,7 @@ import (
 
 	"github.com/CorkCyber/athenadriver/athenareader/lib/configfx"
 	drv "github.com/CorkCyber/athenadriver/v2/go"
-	"go.uber.org/fx"
 )
-
-// Module is to provide dependency of query to main app
-var Module = fx.Provide(new)
-
-// Params defines the dependencies or inputs
-type Params struct {
-	fx.In
-
-	// MyConfig is the current Athenadriver Config
-	MyConfig configfx.AthenaDriverConfig
-}
-
-// Result defines output
-type Result struct {
-	fx.Out
-
-	// QAD is the Query and DB Connection
-	QAD QueryAndDBConnection
-}
 
 // QueryAndDBConnection is the result of queryfx module
 type QueryAndDBConnection struct {
@@ -37,15 +17,14 @@ type QueryAndDBConnection struct {
 	Query []string
 }
 
-func new(p Params) (Result, error) {
-	// Open Connection.
-	dsn := p.MyConfig.DrvConfig.Stringify()
-	db, _ := sql.Open(drv.DriverName, dsn)
-	qad := QueryAndDBConnection{
-		DB:    db,
-		Query: p.MyConfig.QueryString,
+// New opens the Athena connection described by the given config.
+func New(mc configfx.AthenaDriverConfig) (QueryAndDBConnection, error) {
+	db, err := sql.Open(drv.DriverName, mc.DrvConfig.Stringify())
+	if err != nil {
+		return QueryAndDBConnection{}, err
 	}
-	return Result{
-		QAD: qad,
+	return QueryAndDBConnection{
+		DB:    db,
+		Query: mc.QueryString,
 	}, nil
 }

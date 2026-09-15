@@ -101,18 +101,3 @@ func PrettyPrintSQLRows(rows *sql.Rows, style string, render string, page int) {
 func PrettyPrintSQLColsRows(rows *sql.Rows, style string, render string, page int) {
 	prettyPrint(rows, style, render, page, true)
 }
-
-// PrettyPrintCSV prints rows in CSV format with default style.
-func PrettyPrintCSV(rows *sql.Rows) {
-	PrettyPrintSQLColsRows(rows, "StyleDefault", "csv", 1024)
-}
-
-// PrettyPrintMD prints rows in markdown format with default style.
-func PrettyPrintMD(rows *sql.Rows) {
-	PrettyPrintSQLColsRows(rows, "StyleDefault", "markdown", 1024)
-}
-
-// PrettyPrintFancy prints rows in table format with a colored style.
-func PrettyPrintFancy(rows *sql.Rows) {
-	PrettyPrintSQLColsRows(rows, "StyleColoredGreenWhiteOnBlack", "table", 1024)
-}

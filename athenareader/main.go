@@ -3,31 +3,40 @@
 package main
 
 import (
-	"context"
+	"fmt"
+	"os"
 	"strings"
 
 	"github.com/CorkCyber/athenadriver/athenareader/lib/configfx"
 	"github.com/CorkCyber/athenadriver/athenareader/lib/output"
 	"github.com/CorkCyber/athenadriver/athenareader/lib/queryfx"
-	"go.uber.org/fx"
 )
 
 func main() {
-	app := fx.New(opts(), fx.Options(fx.NopLogger))
-	ctx := context.Background()
-	app.Start(ctx)
-	defer app.Stop(ctx)
+	os.Exit(run())
 }
 
-func opts() fx.Option {
-	return fx.Options(
-		configfx.Module,
-		queryfx.Module,
-		fx.Invoke(queryAthena),
-	)
+func run() int {
+	mc, err := configfx.New()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR: "+err.Error())
+		return 1
+	}
+	qad, err := queryfx.New(mc)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR: "+err.Error())
+		return 1
+	}
+	if err := queryAthena(qad, mc); err != nil {
+		return 1
+	}
+	return 0
 }
 
-func queryAthena(qad queryfx.QueryAndDBConnection, mc configfx.AthenaDriverConfig) {
+// queryAthena runs every query and prints its result set. It returns an
+// error if any query failed, so the CLI can exit non-zero.
+func queryAthena(qad queryfx.QueryAndDBConnection, mc configfx.AthenaDriverConfig) error {
+	var failed error
 	for _, query := range qad.Query {
 		query = strings.Trim(query, " \n\t")
 		if query == "" {
@@ -35,17 +44,19 @@ func queryAthena(qad queryfx.QueryAndDBConnection, mc configfx.AthenaDriverConfi
 		}
 		rows, err := qad.DB.Query(query)
 		if err != nil {
-			println("ERROR: " + err.Error())
+			fmt.Fprintln(os.Stderr, "ERROR: "+err.Error())
+			failed = err
 			if mc.OutputConfig.Fastfail {
-				return
+				return failed
 			}
 			continue
 		}
-		defer rows.Close()
 		if mc.OutputConfig.Rowonly {
 			output.PrettyPrintSQLRows(rows, mc.OutputConfig.Style, mc.OutputConfig.Render, mc.OutputConfig.Page)
 		} else {
 			output.PrettyPrintSQLColsRows(rows, mc.OutputConfig.Style, mc.OutputConfig.Render, mc.OutputConfig.Page)
 		}
+		rows.Close()
 	}
+	return failed
 }

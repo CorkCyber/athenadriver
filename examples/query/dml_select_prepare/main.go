@@ -29,6 +29,7 @@ func main() {
 	if err != nil {
 		panic(err)
 	}
+	defer statement.Close()
 	if result, e := statement.Exec("244.157.42.179", 2); e == nil {
 		if rowsAffected, err := result.RowsAffected(); err == nil {
 			println(rowsAffected)
@@ -41,6 +42,7 @@ func main() {
 	if err != nil {
 		return
 	}
+	defer rows.Close()
 	println(drv.ColsRowsToCSV(rows))
 
 }

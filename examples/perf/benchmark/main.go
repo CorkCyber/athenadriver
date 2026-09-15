@@ -23,17 +23,35 @@ func main() {
 		secret.Region,
 		secret.AccessID,
 		secret.SecretAccessKey)
-	os.Setenv("AWS_REGION", "us-east-1")
 	if err != nil {
 		panic(err)
 	}
+
+	// 2. Open Connection: one shared pool for the whole benchmark.
+	db, _ := sql.Open(drv.DriverName, conf.Stringify())
+	defer db.Close()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: drv.DebugLevel}))
+
+	// Pool monitoring: started once, stopped when the benchmark ends.
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				logDBStats2(db.Stats(), logger)
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	var wg sync.WaitGroup
 	numGoRoutine := 10000
-	wg.Add(numGoRoutine)
+	wg.Add(2 * numGoRoutine)
 	for i := range numGoRoutine {
-		// 2. Open Connection.
-		db, _ := sql.Open(drv.DriverName, conf.Stringify())
-		logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: drv.DebugLevel}))
 		go func(i int, conf *drv.Config) {
 			defer wg.Done()
 			// 3. Query cancellation after 2 seconds
@@ -71,13 +89,6 @@ func main() {
 				cnt++
 			}
 		}(i, conf)
-
-		go func(db *sql.DB, logger *slog.Logger) {
-			for range time.Tick(2 * time.Second) {
-				stats := db.Stats()
-				logDBStats2(stats, logger)
-			}
-		}(db, logger)
 	}
 	wg.Wait()
 }

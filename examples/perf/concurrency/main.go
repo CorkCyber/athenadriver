@@ -22,20 +22,37 @@ func main() {
 		secret.Region,
 		secret.AccessID,
 		secret.SecretAccessKey)
-	os.Setenv("AWS_REGION", "us-east-1")
 	if err != nil {
 		panic(err)
 	}
+
+	// 2. Open Connection: one shared pool for all goroutines.
+	db, _ := sql.Open(drv.DriverName, conf.Stringify())
+	defer db.Close()
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: drv.DebugLevel}))
+
+	// Pool monitoring: started once, stopped when the run ends.
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		for {
+			select {
+			case <-ticker.C:
+				logDBStats(db.Stats(), logger)
+			case <-done:
+				return
+			}
+		}
+	}()
+
 	var wg sync.WaitGroup
 	numGoRoutine := 100
 	wg.Add(numGoRoutine)
 	for i := range numGoRoutine {
-		// 2. Open Connection.
-		db, _ := sql.Open(drv.DriverName, conf.Stringify())
-		logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: drv.DebugLevel}))
 		go func(i int, conf *drv.Config) {
 			defer wg.Done()
-			// 3. Query cancellation after 2 seconds
 			ctx := context.WithValue(context.Background(), drv.LoggerKey, logger)
 			// 3. Query
 			r, e := db.QueryContext(ctx, "SHOW FUNCTIONS")
@@ -50,14 +67,10 @@ func main() {
 			for r.Next() {
 				cnt++
 			}
-		}(i, conf)
-
-		go func(db *sql.DB, logger *slog.Logger) {
-			for range time.Tick(2 * time.Second) {
-				stats := db.Stats()
-				logDBStats(stats, logger)
+			if err := r.Err(); err != nil {
+				fmt.Fprintf(os.Stderr, "[%v]%s\n", i, err.Error())
 			}
-		}(db, logger)
+		}(i, conf)
 	}
 	wg.Wait()
 }

@@ -34,5 +34,8 @@ func main() {
 /*
 Sample Output:
 _col0
-1.1.6
+2.0.0
+
+The exact value depends on how the binary was built: the version injected at
+build time via ldflags, or the VCS-derived fallback from the build info.
 */

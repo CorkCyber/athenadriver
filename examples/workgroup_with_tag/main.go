@@ -49,13 +49,16 @@ func main() {
 		}
 		println(requestTimestamp + "," + url)
 	}
+	if err := rows.Err(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 /*
 Sample Output:
 2020/01/20 15:29:52 Workgroup henry_wu doesn't exist and workgroup remote creation is disabled.
 
-After commenting out `conf.WGRemoteCreation = false` at line 27:
+After commenting out `conf.WGRemoteCreation = false` at the line above:
 2015-01-07T16:00:00.516940Z,https://www.example.com/articles/553
 2015-01-07T16:00:00.902953Z,http://www.example.com/images/501
 2015-01-07T16:00:01.206255Z,https://www.example.com/images/183

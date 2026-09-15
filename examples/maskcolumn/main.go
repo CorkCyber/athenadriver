@@ -38,6 +38,9 @@ func main() {
 		}
 		println(requestTimestamp + "," + url)
 	}
+	if err := rows.Err(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 /*

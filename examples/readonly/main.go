@@ -40,7 +40,6 @@ func main() {
 
 /*
 Sample Output:
-{"level":"warn","ts":1580029828.7197285,"caller":"go/observability.go:73",
-"msg":"write db violation","query":"CREATE TABLE sampledb.elb_logs_new AS SELECT * FROM sampledb.elb_logs limit 10;"}
-2020/01/26 01:10:28 writing to Athena database is disallowed in read-only mode
+{"time":"2026-06-15T13:44:26Z","level":"WARN","msg":"write db violation","query":"CREATE TABLE sampledb.elb_logs_new AS SELECT * FROM sampledb.elb_logs limit 10;"}
+2026/06/15 13:44:26 writing to Athena database is disallowed in read-only mode
 */

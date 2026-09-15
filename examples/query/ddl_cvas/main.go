@@ -28,23 +28,23 @@ func main() {
 	// 3. Query and print results
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
-	var rows *sql.Rows
-	rows, err = db.Query("DROP VIEW IF EXISTS sampledb.elb_logs_view;")
-	if err != nil {
+	// DDL returns no rows to read, so Exec is the right call here.
+	if _, err = db.Exec("DROP VIEW IF EXISTS sampledb.elb_logs_view;"); err != nil {
 		log.Fatal(err)
 		return
 	}
-	rows, err = db.Query("CREATE VIEW sampledb.elb_logs_view AS SELECT * FROM sampledb.elb_logs limit 1;")
-	if err != nil {
-		log.Println(err)
+	if _, err = db.Exec("CREATE VIEW sampledb.elb_logs_view AS SELECT * FROM sampledb.elb_logs limit 1;"); err != nil {
+		log.Fatal(err)
+		return
 	}
 
 	ctx := context.WithValue(context.Background(), drv.LoggerKey, logger)
-	rows, err = db.QueryContext(ctx, "describe sampledb.elb_logs_view")
+	rows, err := db.QueryContext(ctx, "describe sampledb.elb_logs_view")
 	if err != nil {
 		log.Fatal(err)
 		return
 	}
+	defer rows.Close()
 	println(drv.ColsRowsToCSV(rows))
 }
 

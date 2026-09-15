@@ -12,10 +12,10 @@ import (
 func main() {
 	// 1. Set AWS Credential in Driver Config.
 	conf, err := drv.NewDefaultConfig(secret.OutputBucket, secret.Region, secret.AccessID, secret.SecretAccessKey)
-	conf.LoggingEnabled = true
 	if err != nil {
 		panic(err)
 	}
+	conf.LoggingEnabled = true
 
 	// 2. Open Connection.
 	dsn := conf.Stringify()

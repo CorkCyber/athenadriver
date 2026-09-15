@@ -24,17 +24,18 @@ func main() {
 	db, _ := sql.Open(drv.DriverName, dsn)
 	// 3. Query and print results
 
-	var rows *sql.Rows
-	rows, err = db.Query("DROP TABLE IF EXISTS sampledb.elb_logs_new;")
+	// DDL returns no rows to read, so Exec is the right call here.
+	if _, err = db.Exec("DROP TABLE IF EXISTS sampledb.elb_logs_new;"); err != nil {
+		log.Fatal(err)
+		return
+	}
+	rows, err := db.Query("CREATE TABLE sampledb.elb_logs_new AS	" +
+		"SELECT * FROM sampledb.elb_logs limit 10;")
 	if err != nil {
 		log.Fatal(err)
 		return
 	}
-	rows, err = db.Query("CREATE TABLE sampledb.elb_logs_new AS	" +
-		"SELECT * FROM sampledb.elb_logs limit 10;")
-	if err != nil {
-		log.Println(err)
-	}
+	defer rows.Close()
 
 	println(drv.ColsRowsToCSV(rows))
 }

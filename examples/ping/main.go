@@ -28,8 +28,8 @@ func main() {
 	db, _ := sql.Open(drv.DriverName, dsn)
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
-	// 3. Query cancellation after 2 seconds
-	ctx, cancel := context.WithTimeout(context.Background(), 2000*time.Second)
+	// 3. Ping with a 2-second connection timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	ctx = context.WithValue(ctx, drv.LoggerKey, logger)
 	e := db.PingContext(ctx)

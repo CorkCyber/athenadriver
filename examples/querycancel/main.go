@@ -43,6 +43,9 @@ func main() {
 		}
 		println(cnt)
 	}
+	if err := rows.Err(); err != nil {
+		log.Fatal(err)
+	}
 }
 
 /*

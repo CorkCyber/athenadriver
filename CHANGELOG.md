@@ -23,7 +23,7 @@ Full migration steps live in the [README v2 migration guide](README.md#v200-migr
 2. **AWS SDK v1 → v2** — types move to `aws-sdk-go-v2/service/athena/types`; credentials flow through `aws.Config`. DSN keys unchanged.
 3. **`Config` is a typed struct** — assign fields directly. Validating setters kept: `SetOutputBucket`, `SetRegion`, `SetAccessID`, `SetSecretAccessKey`, `SetWorkGroup`.
 4. **Logger** — `*zap.Logger` → `*slog.Logger`. Silent runtime break for callers that inject via `LoggerKey` ctx.
-5. **Go floor** — 1.13 → 1.22.
+5. **Go floor** — 1.13 → 1.24.
 6. **`athenareader/` is a separate module** — `github.com/CorkCyber/athenadriver/athenareader`.
 7. **`ServiceLimitOverride` is a typed struct** — assign `DDLQueryTimeout` / `DMLQueryTimeout` fields. Setters + `ErrServiceLimitOverride` removed.
 8. **Constructors collapsed** — `NewDefaultObservability`, `NewNoOpsObservability`, `NewWGConfig`, `NewNonOpsRows` removed. Use `NewObservability(cfg, nil, nil)` and struct literals.
@@ -32,6 +32,8 @@ Full migration steps live in the [README v2 migration guide](README.md#v200-migr
     - `github.com/CorkCyber/athenadriver/scope/otel`
     - `github.com/CorkCyber/athenadriver/scope/tally`
     - `github.com/CorkCyber/athenadriver/scope/statsd`
+11. **String / `[]byte` query arguments are now quoted and escaped automatically.** `buildExecutionParams` previously passed them to Athena's `ExecutionParameters` unquoted — a SQL injection primitive, since Athena evaluates each parameter as a SQL expression rather than a bound value. Existing code that pre-formats an argument with `drv.FormatString()` / `drv.FormatBytes()` before passing it to `Query`/`Exec` will now double-quote it. To send a raw, unquoted SQL expression (a typecast, a function call), wrap it in the new `drv.Raw` type instead — never build one from untrusted input. See [Parameterized Queries](README.md#parameterized-queries).
+12. **`Config.String()` now returns a credential-masked DSN**, not the full connectable one — it previously leaked the AWS secret key and session token in cleartext to any incidental `%v`/`%+v` formatting. Code relying on `String()` to produce a DSN usable with `sql.Open` must call `Stringify()` explicitly instead.
 
 ### Added
 
@@ -96,7 +98,7 @@ Internal only. See "Breaking" above for user-visible v1 → v2 changes.
 - Vendored `aws-sdk-go` v1 `awsutil.Prettify` replaced with a purpose-built formatter for `athena/types.WorkGroupConfiguration` and its nested types.
 - CI replaced `.travis.yml` with `.github/workflows/ci.yml`: `go vet`, `gofmt -s`, `go test -race` across Go 1.22 / 1.23 / 1.24, Codecov, athenareader CLI build.
 - `go.mod` `go` directive relaxed from `1.26.3` (Grafana plugin default) to `1.22`.
-- `examples/metrics.go` moved to `cactus/go-statsd-client/v5` (matches `tally/v4` statsd reporter).
+- `examples/metrics/main.go` rewritten against the new `Scope` interface, using the OpenTelemetry adapter (`scope/otel`) as the reference implementation; `scope/tally` and `scope/statsd` are noted as drop-in alternatives.
 - README: "About this fork" section, badges refreshed, FOSSA badge dropped.
 
 ### Removed

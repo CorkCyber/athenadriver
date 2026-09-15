@@ -17,7 +17,6 @@ import (
 
 func main() {
 	// 1. Set AWS Credential in Driver Config.
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
 	conf, err := drv.NewDefaultConfig(
 		"s3://qr-athena-query-result/",
 		secret.Region,

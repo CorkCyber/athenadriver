@@ -93,7 +93,6 @@ func new(p Params) (Result, error) {
 			return nil
 		},
 		OnStop: func(ctx context.Context) error {
-			os.Unsetenv("AWS_SDK_LOAD_CONFIG")
 			return nil
 		},
 	})

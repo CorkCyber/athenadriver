@@ -18,11 +18,12 @@ git remote add upstream https://github.com/CorkCyber/athenadriver.git
 git fetch upstream
 ```
 
-The repository is three Go modules:
+The repository is six Go modules:
 
 - `./` — the driver (`./go/...`)
 - `./athenareader` — CLI tool
 - `./examples` — runnable example programs
+- `./scope/otel`, `./scope/tally`, `./scope/statsd` — optional metrics adapters
 
 Run the unit + race tests:
 

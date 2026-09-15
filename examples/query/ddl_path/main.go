@@ -20,7 +20,6 @@ import (
 // But Athena supports only $path
 func main() {
 	// 1. Set AWS Credential in Driver Config.
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
 	conf, err := drv.NewDefaultConfig(secret.OutputBucket, secret.Region,
 		secret.AccessID, secret.SecretAccessKey)
 	if err != nil {

@@ -26,17 +26,15 @@ func useAthenaDriverConfigForAuth() {
 	println("with AthenaDriver Config:", i)
 }
 
-// AWS_SDK_LOAD_CONFIG is used here for multiple use cases
-// - use AWS CLI's Config for authentication
-// - use in AWS Lambda where access ID and key are not required
-// - assume role where access ID and key are not required
-// Ref: https://github.com/CorkCyber/athenadriver/pull/10
+// To use the AWS SDK's default credential chain for authentication — shared
+// config (~/.aws/config), shared credentials (~/.aws/credentials), SSO,
+// container/IRSA credentials, or IMDS. Leaving Config.AccessID unset is what
+// selects this path: the driver resolves everything via
+// config.LoadDefaultConfig, exactly like any other AWS SDK v2 client.
 func useAWSCLIConfigForAuth() {
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
-	// 1. Set AWS Credential in Driver Config.
-	conf, err := drv.NewDefaultConfig(secret.OutputBucketProd, drv.DefaultRegion,
-		drv.DummyAccessID, drv.DummySecretAccessKey)
-	if err != nil {
+	// 1. Leave credentials unset in Driver Config.
+	conf := drv.NewNoOpsConfig()
+	if err := conf.SetOutputBucket(secret.OutputBucketProd); err != nil {
 		println(err.Error())
 		return
 	}
@@ -53,18 +51,17 @@ func useAWSCLIConfigForAuth() {
 		println(err.Error())
 	}
 	println("with AWS CLI Config:", i)
-	os.Unsetenv("AWS_SDK_LOAD_CONFIG")
 }
 
-// To use AWS CLI's Config for authentication with non-default profile set up by env variable AWS_PROFILE
-// Refer: https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html
+// To use the AWS SDK's default credential chain with a non-default profile
+// selected via the AWS_PROFILE environment variable.
+// Refer: https://docs.aws.amazon.com/sdk-for-go/v2/developer-guide/configuring-sdk.html
 func useAWSCLIConfigForAuthProfileByEnv(profile string) {
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
 	os.Setenv("AWS_PROFILE", profile)
-	// 1. Set AWS Credential in Driver Config.
-	conf, err := drv.NewDefaultConfig(secret.OutputBucketDev, drv.DummyRegion,
-		drv.DummyAccessID, drv.DummySecretAccessKey)
-	if err != nil {
+	// 1. Leave credentials unset in Driver Config; AWS_PROFILE (just set
+	// above) selects the shared-config profile.
+	conf := drv.NewNoOpsConfig()
+	if err := conf.SetOutputBucket(secret.OutputBucketDev); err != nil {
 		return
 	}
 	// 2. Open Connection.
@@ -73,17 +70,16 @@ func useAWSCLIConfigForAuthProfileByEnv(profile string) {
 	var i int
 	_ = db.QueryRow("SELECT 789").Scan(&i)
 	println("with AWS CLI Config With Profile:", i)
-	os.Unsetenv("AWS_SDK_LOAD_CONFIG")
+	os.Unsetenv("AWS_PROFILE")
 }
 
-// To use AWS CLI's Config for authentication with a manually set up non-default profile
-// Refer: https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html
+// To use the AWS SDK's default credential chain with a profile set
+// explicitly on the Config rather than via the environment.
 func useAWSCLIConfigForAuthProfileByManualSetup(profile string) {
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
-	// 1. Set AWS Credential in Driver Config.
-	conf, err := drv.NewDefaultConfig(secret.OutputBucketDev, drv.DummyRegion,
-		drv.DummyAccessID, drv.DummySecretAccessKey)
-	if err != nil {
+	// 1. Leave credentials unset in Driver Config; AWSProfile selects the
+	// shared-config profile explicitly.
+	conf := drv.NewNoOpsConfig()
+	if err := conf.SetOutputBucket(secret.OutputBucketDev); err != nil {
 		return
 	}
 	conf.AWSProfile = profile
@@ -93,7 +89,6 @@ func useAWSCLIConfigForAuthProfileByManualSetup(profile string) {
 	var i int
 	_ = db.QueryRow("SELECT 789").Scan(&i)
 	println("with AWS CLI Config With Profile:", i)
-	os.Unsetenv("AWS_SDK_LOAD_CONFIG")
 }
 
 func main() {

@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"database/sql"
-	"os"
 
 	secret "github.com/CorkCyber/athenadriver/examples/constants"
 	drv "github.com/CorkCyber/athenadriver/v2/go"
@@ -13,7 +12,6 @@ import (
 
 func main() {
 	// 1. Set AWS Credential in Driver Config.
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
 	conf, err := drv.NewDefaultConfig(secret.OutputBucket, secret.Region, secret.AccessID, secret.SecretAccessKey)
 	conf.LoggingEnabled = true
 	if err != nil {

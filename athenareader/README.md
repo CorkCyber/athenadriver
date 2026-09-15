@@ -4,19 +4,19 @@
 
 ## Authentication Method
 
-To avoid exposing access keys(Access Key ID and Secret Access Key) in command line, `athenareader` use [AWS CLI Config For Authentication](https://github.com/CorkCyber/athenadriver#use-aws-cli-config-for-authentication) method.
+To avoid exposing access keys(Access Key ID and Secret Access Key) in command line, `athenareader` uses the [AWS SDK's default credential chain](https://github.com/CorkCyber/athenadriver#use-the-aws-sdks-default-credential-chain) — shared config/credentials files, SSO, container/IRSA credentials, or IMDS.
 
 ## How to get/build/install `athenareader`
 
 ```
-go get -u github.com/CorkCyber/athenadriver/athenareader
+go install github.com/CorkCyber/athenadriver/athenareader@latest
 ```
 
 ## How to use `athenareader`
 
 You can use `athenareader -h` or ` athenareader --help` to the the plain text version of help text below.
 
-You can set options in command line or file `athenareader.config`, which is located at your home directory or the same directory with athenareader binary. When there is overlapping in options, command line option will be preferred.
+You can set options in command line or file `athenareader.config`, which is looked up in your home directory first, then the current working directory (not the directory the binary itself lives in). If neither has one, a built-in default is written to your home directory on first run. When there is overlapping in options, command line option will be preferred.
 
 NAME
 

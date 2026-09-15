@@ -197,7 +197,7 @@ New constants: `PollBackoffMultiplier` (1.5), `PollMaxInterval` (30s). `PoolInte
 
 ### 10. Metrics decoupled from tally
 
-Driver core depends only on stdlib for its metrics surface. `MetricsKey` ctx values must now satisfy `athenadriver.Scope` (3 methods) — a raw `tally.Scope` no longer type-asserts. Pick an adapter, or write your own in ~15 lines.
+Driver core depends only on stdlib for its metrics surface. `MetricsKey` ctx values must now satisfy `athenadriver.Scope` (2 methods: `Counter`, `Timer`) — a raw `tally.Scope` no longer type-asserts. Pick an adapter, or write your own in ~15 lines.
 
 Ready-made:
 
@@ -234,7 +234,7 @@ Except the basic features provided by Go `database/sql` like error handling, dat
 - Query with Athena Query ID(QID) - (the ultimate money saver! :money_with_wings: )
 - Pseudo commands on the `database/sql` interface: `get_driver_version`, `get_query_id`, `get_query_id_status`, `stop_query_id` [:link:](#pseudo-commands)
 - Built-in `log/slog` logging support [:link:](#enable-driver-logging)
-- Bring-your-own metrics via a 3-method `Scope` interface; ready-made adapters for OpenTelemetry, tally, and statsd [:link:](#enable-metrics)
+- Bring-your-own metrics via a 2-method `Scope` interface; ready-made adapters for OpenTelemetry, tally, and statsd [:link:](#enable-metrics)
 
 `athenadriver` can extremely simplify your code. Check [athenareader](https://github.com/CorkCyber/athenadriver/tree/master/athenareader) out as an example and a convenient tool for your Athena query in command line. 
 
@@ -280,12 +280,15 @@ go install github.com/CorkCyber/athenadriver/athenareader@latest
 
 ### Tests
 
-The repository is split into three Go modules:
+The repository is split into six Go modules:
 
 - `github.com/CorkCyber/athenadriver/v2` — the driver itself (`./go/...`).
 - `github.com/CorkCyber/athenadriver/athenareader` — the CLI tool.
 - `github.com/CorkCyber/athenadriver/examples` — runnable example
   programs, each in its own subdirectory.
+- `github.com/CorkCyber/athenadriver/scope/otel`, `scope/tally`,
+  `scope/statsd` — optional metrics adapters (see [Enable
+  Metrics](#enable-metrics)); install only the one you use.
 
 #### Unit tests
 
@@ -361,41 +364,42 @@ https://www.example.com/articles/553
 
 ### Support Multiple AWS Authentication Methods
 
-`athenadriver` uses access keys(Access Key ID and Secret Access Key) to sign programmatic requests to AWS.
-When if the AWS_SDK_LOAD_CONFIG environment variable was set, `athenadriver` uses [`Shared Config`](https://docs.aws.amazon.com/sdk-for-go/api/aws/session/#pkg-overview), respects [AWS CLI Configuration and Credential File Settings](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html) and gives it even higher priority over the values set in `athenadriver.Config`.
+`athenadriver` resolves AWS credentials the same way any AWS SDK for Go v2 client does, via [`config.LoadDefaultConfig`](https://pkg.go.dev/github.com/aws/aws-sdk-go-v2/config#LoadDefaultConfig). There is no `AWS_SDK_LOAD_CONFIG` gate — that was a v1-only environment variable and is not read anywhere in v2. Precedence, checked in order:
 
-#### Use AWS CLI Config For Authentication
+1. `Config.AWSProfile` — an explicit shared-config profile name.
+2. `Config.WebIdentityRoleARN` + `Config.WebIdentityTokenFile` — explicit `AssumeRoleWithWebIdentity` (EKS/IRSA-style).
+3. `Config.AccessID` set explicitly on the DSN/Config — static access key, secret key, and (optionally) session token.
+4. Otherwise, the standard AWS SDK v2 chain: environment variables (`AWS_ACCESS_KEY_ID`, etc.), `~/.aws/credentials` and `~/.aws/config` (including `AWS_PROFILE`), SSO, container/IRSA credentials, and IMDS.
 
-When environment variable `AWS_SDK_LOAD_CONFIG` is set, it will read `aws_access_key_id`(AccessID) and `aws_secret_access_key`(SecretAccessKey)
-from `~/.aws/credentials`, `region` from `~/.aws/config`. For details about `~/.aws/credentials` and `~/.aws/config`, please check [here](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-files.html).
-
-But you still need to specify correct `OutputBucket` in `athenadriver.Config` because it is not in the AWS client config.
-
-`OutputBucket` is critical in Athena. Even if you have a default value set in Athena web console, you must pass one programmatically or you will get error:
+`OutputBucket` is always required regardless of authentication method — it is not part of the AWS client config. Even with a default location set in the Athena web console, you must pass one programmatically or you will get:
 `No output location provided. An output location is required either through the Workgroup result configuration setting or as an API input.`
 
+#### Use the AWS SDK's Default Credential Chain
 
-The sample code below enforces AWS_SDK_LOAD_CONFIG is set, so `athenadriver`'s AWS Session will be created from the configuration values from the shared config (`~/.aws/config`) and shared credentials (`~/.aws/credentials`) files.
-Even if we pass all dummy values as parameters in `NewDefaultConfig()` except `OutputBucket`, they are overridden by
-the values in AWS CLI config files, so it doesn't really matter.
+Leave `Config.AccessID` unset and the driver falls through to the standard chain — shared config/credentials files, SSO, container/IRSA credentials, or IMDS. This is the right choice on EC2, ECS, EKS, and Lambda, where credentials come from the execution role rather than a static key.
 
 ```go
-// To use AWS CLI's Config for authentication
+// To use the AWS SDK's default credential chain for authentication
 func useAWSCLIConfigForAuth() {
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
-	// 1. Set AWS Credential in Driver Config.
-	conf, err := drv.NewDefaultConfig(secret.OutputBucketProd, drv.DummyRegion,
-		drv.DummyAccessID, drv.DummySecretAccessKey)
-	if err != nil {
+	// 1. Leave credentials unset in Driver Config.
+	conf := drv.NewNoOpsConfig()
+	if err := conf.SetOutputBucket(secret.OutputBucketProd); err != nil {
+		println(err.Error())
 		return
 	}
 	// 2. Open Connection.
-	db, _ := sql.Open(drv.DriverName, conf.Stringify())
+	db, err := sql.Open(drv.DriverName, conf.Stringify())
+	if err != nil {
+		println(err.Error())
+		return
+	}
 	// 3. Query and print results
 	var i int
-	_ = db.QueryRow("SELECT 456").Scan(&i)
+	err = db.QueryRow("SELECT 456").Scan(&i)
+	if err != nil {
+		println(err.Error())
+	}
 	println("with AWS CLI Config:", i)
-	os.Unsetenv("AWS_SDK_LOAD_CONFIG")
 }
 ```
 
@@ -405,19 +409,23 @@ If your AWS CLI setting is valid like mine, this function should output:
 with AWS CLI Config: 456
 ```
 
-The above authentication method also works for querying Athena in [AWS Lambda](https://aws.amazon.com/lambda/). In lambda, you don't have to provide access ID, key and region, and you don't need AWS CLI config files either. You just need to specify the correct output bucket.
-Please check the AWS Lambda Go same code [here](https://github.com/CorkCyber/athenadriver/tree/master/examples/lambda/Go).
+This is also the authentication method to use in [AWS Lambda](https://aws.amazon.com/lambda/): the function's execution role is picked up automatically via IMDS/container credentials, so you only need to specify the output bucket.
+Please check the AWS Lambda Go sample code [here](https://github.com/CorkCyber/athenadriver/tree/master/examples/lambda/Go).
+
+A non-default profile can be selected either via the `AWS_PROFILE` environment variable or explicitly on `Config.AWSProfile`:
+
+```go
+conf := drv.NewNoOpsConfig()
+conf.AWSProfile = "profile-development" // or: os.Setenv("AWS_PROFILE", "profile-development")
+```
 
 #### Use `athenadriver` Config For Authentication
 
-When environment variable `AWS_SDK_LOAD_CONFIG` is NOT set, you may explicitly define credentials by passing valid (NOT dummy) `accessID`, `secretAccessKey`, `region`, and `outputBucket` into `athenadriver.NewDefaultConfig()`.
-
-The sample code below ensure `AWS_SDK_LOAD_CONFIG` is not set, then pass four valid parameters into `NewDefaultConfig()`:
+To supply a static access key explicitly, pass valid (not dummy) `accessID`, `secretAccessKey`, `region`, and `outputBucket` into `athenadriver.NewDefaultConfig()`:
 
 ```go
 // To use athenadriver's Config for authentication
 func useAthenaDriverConfigForAuth() {
-	os.Unsetenv("AWS_SDK_LOAD_CONFIG")
 	// 1. Set AWS Credential in Driver Config.
 	conf, err := drv.NewDefaultConfig(secret.OutputBucketDev, secret.Region,
 		secret.AccessID, secret.SecretAccessKey)
@@ -439,36 +447,6 @@ with AthenaDriver Config: 123
 ```
 
 The full code is here at [examples/auth/main.go](https://github.com/CorkCyber/athenadriver/tree/master/examples/auth/main.go).
-
-#### Use AWS SDK Default Credentials Resolution for Authentication
-If environment variable `AWS_SDK_LOAD_CONFIG` is NOT set and credentials are not supplied in the `athenadriver` configuration, the AWS SDK will look up credentials using its default methodology described here: https://docs.aws.amazon.com/sdk-for-go/v1/developer-guide/configuring-sdk.html#specifying-credentials.
-
-`Region` and `OutputBucket` bucket still need to be explictly defined.
-
-The sample code below ensures `AWS_SDK_LOAD_CONFIG` is not set, then creates a athenadriver config with OutputBucket and Region values set.
-
-```go
-// To use AWS SDK Default Credentials
-func useAthenaDriverConfigForAuth() {
-	os.Unsetenv("AWS_SDK_LOAD_CONFIG")
-	// 1. Set OutputBucket and Region in Driver Config.
-	conf := drv.NewNoOpsConfig()
-	conf.SetOutputBucket(secret.OutputBucketDev)
-	conf.SetRegion(secret.Region)
-
-	// 2. Open Connection.
-	db, _ := sql.Open(drv.DriverName, conf.Stringify())
-	// 3. Query and print results
-	var i int
-	_ = db.QueryRow("SELECT 123").Scan(&i)
-	println("with AthenaDriver Config:", i)
-}
-```
-The sample output:
-
-```go
-with AthenaDriver Config: 123
-```
 
 ### Full Support of All Data Types 
 
@@ -660,8 +638,7 @@ Example:
 
 ```go
 query := "SELECT request_timestamp, elb_name FROM sampledb.elb_logs WHERE url=? limit 1"
-args := []any{"https://www.example.com/jobs/878"}
-rows, err := db.Query(query, args)
+rows, err := db.Query(query, "https://www.example.com/jobs/878")
 if err != nil {
     return
 }
@@ -1021,14 +998,12 @@ package main
 
 import (
 	"database/sql"
-	"os"
 	secret "github.com/CorkCyber/athenadriver/examples/constants"
 	drv "github.com/CorkCyber/athenadriver/v2/go"
 )
 
 func main() {
 	// 1. Set AWS Credential in Driver Config.
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
 	conf, err := drv.NewDefaultConfig(secret.OutputBucket, secret.Region, secret.AccessID, secret.SecretAccessKey)
 	conf.LoggingEnabled = true
 	if err != nil {
@@ -1145,11 +1120,13 @@ Sample output (with an `slog.NewJSONHandler` and Info-level threshold):
 
 ### Enable Metrics
 
-The driver emits counters + timers through a 3-method interface
-(`athenadriver.Scope` / `Counter` / `Timer`) — no vendored metrics
-library. Bring your own backend by supplying a `Scope`. Metrics are
-enabled by default but wired to `NoopScope`, so nothing is emitted
-until you inject one:
+The driver emits counters + timers through three small interfaces
+(`athenadriver.Scope`, `Counter`, `Timer`) — no vendored metrics
+library. `Scope` has 2 methods (`Counter(name) Counter`, `Timer(name)
+Timer`); `Counter` and `Timer` each have 1 (`Inc(int64)`,
+`Record(time.Duration)`). Bring your own backend by supplying a
+`Scope`. Metrics are enabled by default but wired to `NoopScope`, so
+nothing is emitted until you inject one:
 
 ```go
 conf.MetricsEnabled = true               // (already the default)
@@ -1167,9 +1144,10 @@ you use):
 | tally   | `github.com/CorkCyber/athenadriver/scope/tally`  | `tallyscope.New(tally.Scope)` |
 | statsd  | `github.com/CorkCyber/athenadriver/scope/statsd` | `statsdscope.New(statsd.Statter)` |
 
-Rolling your own backend is ~15 lines of glue — the interface only
-has two methods (`Counter.Inc(int64)` and `Timer.Record(time.Duration)`).
-See any of the three adapter packages for a reference.
+Rolling your own backend is ~15 lines of glue — `Scope` itself only
+has two methods; `Counter.Inc(int64)` and `Timer.Record(time.Duration)`
+are each a single-method interface. See any of the three adapter
+packages for a reference.
 
 **Example — OpenTelemetry** (see `examples/metrics/` for the full
 runnable version with an OTLP-shaped exporter):

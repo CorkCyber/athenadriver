@@ -78,7 +78,10 @@ type Config struct {
 	ServiceLimit *ServiceLimitOverride
 
 	// MaskedColumns maps a column name to the substitute value the
-	// driver should hand database/sql when the column is read.
+	// driver should hand database/sql when the column is read. Keys are
+	// matched case-insensitively (Athena lowercases unquoted identifiers
+	// in ResultSetMetadata) — populate this map via SetMaskedColumnValue
+	// rather than assigning it directly, so casing is normalized.
 	MaskedColumns map[string]string
 }
 

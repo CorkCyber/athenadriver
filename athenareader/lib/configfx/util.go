@@ -16,7 +16,6 @@ import (
 var defaultConfig []byte
 
 func setUpFlagUsage(context.Context) error {
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
 	var commandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	flag.Usage = func() {
 		preBody := "NAME\n\tathenareader - read athena data from command line\n\n"

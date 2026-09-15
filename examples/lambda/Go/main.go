@@ -7,7 +7,6 @@ import (
 	drv "github.com/CorkCyber/athenadriver/v2/go"
 	"github.com/aws/aws-lambda-go/events"
 	"github.com/aws/aws-lambda-go/lambda"
-	"os"
 )
 
 type response struct {
@@ -18,11 +17,11 @@ type response struct {
 // https://epsagon.com/blog/getting-started-with-aws-lambda-and-go/
 // https://docs.aws.amazon.com/lambda/latest/dg/golang-package.html
 func handleRequest(ctx context.Context, request events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
-	// 1. Set AWS Credential in Driver Config.
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
-	conf, err := drv.NewDefaultConfig("s3://athena-query-result/lambda/",
-		drv.DummyRegion, drv.DummyAccessID, drv.DummySecretAccessKey)
-	if err != nil {
+	// 1. Leave credentials unset so the driver resolves them via the
+	// standard AWS SDK v2 chain — on Lambda that's the function's
+	// execution role, picked up from the container's IMDS/env credentials.
+	conf := drv.NewNoOpsConfig()
+	if err := conf.SetOutputBucket("s3://athena-query-result/lambda/"); err != nil {
 		return events.APIGatewayProxyResponse{}, err
 	}
 	// 2. Open Connection.

@@ -76,9 +76,33 @@ func TestAdapterLiveFire(t *testing.T) {
 	}
 }
 
-// TestAdapterConcurrentLookup exercises the sync.Mutex-guarded
+// TestAdapterCacheHit pins the two properties of the cache: a repeat
+// lookup returns the identical wrapper (so the instrument was built once)
+// and costs zero allocations (no fresh wrapper escaping to the heap).
+func TestAdapterCacheHit(t *testing.T) {
+	provider := metric.NewMeterProvider(metric.WithReader(metric.NewManualReader()))
+	defer provider.Shutdown(context.Background())
+	s := New(provider.Meter("cache.test"))
+
+	if a, b := s.Counter("k"), s.Counter("k"); a != b {
+		t.Errorf("Counter(%q) returned different wrappers: %#v vs %#v", "k", a, b)
+	}
+	if a, b := s.Timer("k"), s.Timer("k"); a != b {
+		t.Errorf("Timer(%q) returned different wrappers: %#v vs %#v", "k", a, b)
+	}
+
+	if n := testing.AllocsPerRun(100, func() { _ = s.Counter("k") }); n != 0 {
+		t.Errorf("Counter cache hit allocated %v times, want 0", n)
+	}
+	if n := testing.AllocsPerRun(100, func() { _ = s.Timer("k") }); n != 0 {
+		t.Errorf("Timer cache hit allocated %v times, want 0", n)
+	}
+}
+
+// TestAdapterConcurrentLookup exercises the RWMutex-guarded
 // counter/timer cache under `-race`. Many goroutines racing on the same
-// and on different names — must never deadlock or corrupt the map.
+// and on different names — must never deadlock or corrupt the map, and
+// every goroutine must see the same wrapper for a given name.
 func TestAdapterConcurrentLookup(t *testing.T) {
 	reader := metric.NewManualReader()
 	provider := metric.NewMeterProvider(metric.WithReader(reader))
@@ -87,6 +111,7 @@ func TestAdapterConcurrentLookup(t *testing.T) {
 
 	const goroutines = 32
 	const perGoroutine = 128
+	var seen sync.Map // name -> drv.Counter, first wrapper any goroutine got
 	var wg sync.WaitGroup
 	wg.Add(goroutines)
 	for g := range goroutines {
@@ -94,7 +119,11 @@ func TestAdapterConcurrentLookup(t *testing.T) {
 			defer wg.Done()
 			for i := range perGoroutine {
 				name := fmt.Sprintf("k%d", (id+i)%4) // 4 shared names
-				s.Counter(name).Inc(1)
+				c := s.Counter(name)
+				if prev, loaded := seen.LoadOrStore(name, c); loaded && prev != c {
+					t.Errorf("Counter(%q) returned two different wrappers", name)
+				}
+				c.Inc(1)
 				s.Timer(name).Record(time.Microsecond)
 			}
 		}(g)

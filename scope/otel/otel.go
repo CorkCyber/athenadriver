@@ -31,50 +31,67 @@ func New(meter metric.Meter) drv.Scope {
 	if meter == nil {
 		return drv.NoopScope
 	}
-	return &scope{meter: meter}
+	return &scope{
+		meter:    meter,
+		counters: map[string]drv.Counter{},
+		timers:   map[string]drv.Timer{},
+	}
 }
 
+// scope caches the fully-wrapped drv.Counter/drv.Timer, not the raw otel
+// instrument: the driver calls Scope().Counter(name) at the call site (once
+// per unconvertible cell, say), so a cache hit must not allocate a wrapper.
 type scope struct {
 	meter    metric.Meter
-	mu       sync.Mutex
-	counters map[string]metric.Int64Counter
-	timers   map[string]metric.Float64Histogram
+	mu       sync.RWMutex
+	counters map[string]drv.Counter
+	timers   map[string]drv.Timer
 }
 
 func (s *scope) Counter(name string) drv.Counter {
+	s.mu.RLock()
+	c, ok := s.counters[name]
+	s.mu.RUnlock()
+	if ok {
+		return c
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.counters == nil {
-		s.counters = map[string]metric.Int64Counter{}
+	if c, ok := s.counters[name]; ok { // another goroutine won the race
+		return c
 	}
-	c, ok := s.counters[name]
-	if !ok {
-		var err error
-		c, err = s.meter.Int64Counter(name)
-		if err != nil {
-			return drv.NoopScope.Counter(name)
-		}
-		s.counters[name] = c
+	ic, err := s.meter.Int64Counter(name)
+	if err != nil {
+		c = drv.NoopScope.Counter(name)
+	} else {
+		c = counter{ic}
 	}
-	return counter{c}
+	s.counters[name] = c
+	return c
 }
 
 func (s *scope) Timer(name string) drv.Timer {
+	s.mu.RLock()
+	t, ok := s.timers[name]
+	s.mu.RUnlock()
+	if ok {
+		return t
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.timers == nil {
-		s.timers = map[string]metric.Float64Histogram{}
+	if t, ok := s.timers[name]; ok {
+		return t
 	}
-	h, ok := s.timers[name]
-	if !ok {
-		var err error
-		h, err = s.meter.Float64Histogram(name, metric.WithUnit("ms"))
-		if err != nil {
-			return drv.NoopScope.Timer(name)
-		}
-		s.timers[name] = h
+	h, err := s.meter.Float64Histogram(name, metric.WithUnit("ms"))
+	if err != nil {
+		t = drv.NoopScope.Timer(name)
+	} else {
+		t = timer{h}
 	}
-	return timer{h}
+	s.timers[name] = t
+	return t
 }
 
 type counter struct{ c metric.Int64Counter }

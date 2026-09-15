@@ -55,12 +55,9 @@ func buildPage(cols []athenatypes.ColumnInfo, rows []athenatypes.Row, updateCoun
 }
 
 // mockHooks lets a test steer the mock per call site: force a specific AWS
-// error (a real modeled type, not just the generic sentinel), return a
-// different result on successive calls, block a call, or inspect the ctx a
-// call received. The zero value reproduces the mock's default behavior.
-//
-// Hook FIELDS are set before the test's goroutines start and only read
-// afterwards; the mutex guards only the recorded call data.
+// error, vary the result across calls, block a call, or inspect its ctx.
+// Zero value reproduces default mock behavior. Hook fields are set before
+// test goroutines start and only read after; the mutex guards call data.
 type mockHooks struct {
 	mu       sync.Mutex
 	calls    map[string]int
@@ -174,6 +171,7 @@ func newMockAthenaClient() *mockAthenaClient {
 			"PING_OK_QID":                          pingPage(),
 			"SELECTExecContext_OK_QID":             pingPage(),
 			"SELECTQueryContext_OK_QID":            pingPage(),
+			"SELECTQueryContext_TIMING_QID":        pingPage(),
 			"00000000-0000-0000-0000-000000000000": pingPage(),
 			"pc:get_query_id":                      pingPage(),
 			"FAILED_AFTER_GETQID x": singlePage(buildPage(
@@ -271,6 +269,7 @@ var queryToQID = map[string]string{
 	"When_StartQueryExecution_Succeed_but_GetQueryExecutionWithContext_return_nil_and_error x": "When_StartQueryExecution_Succeed_but_GetQueryExecutionWithContext_return_nil_and_error_QID",
 	"StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateCancelled x":       "QueryExecutionStateCancelled_QID",
 	"StartQueryExecution_OK_GetQueryExecutionWithContext_QueryExecutionStateFailed x":          "QueryExecutionStateFailed_QID",
+	"SELECTQueryContext_TIMING x": "SELECTQueryContext_TIMING_QID",
 }
 
 func (m *mockAthenaClient) StartQueryExecution(_ context.Context, s *athena.StartQueryExecutionInput, _ ...func(options *athena.Options)) (*athena.StartQueryExecutionOutput, error) {
@@ -325,6 +324,20 @@ func withStatementType(s athenatypes.StatementType) qeOpt {
 	return func(e *athenatypes.QueryExecution) { e.StatementType = s }
 }
 
+func withTiming(queueMs, planningMs, engineMs, servicePreMs, serviceProcessMs, totalMs int64) qeOpt {
+	return func(e *athenatypes.QueryExecution) {
+		if e.Statistics == nil {
+			e.Statistics = &athenatypes.QueryExecutionStatistics{}
+		}
+		e.Statistics.QueryQueueTimeInMillis = &queueMs
+		e.Statistics.QueryPlanningTimeInMillis = &planningMs
+		e.Statistics.EngineExecutionTimeInMillis = &engineMs
+		e.Statistics.ServicePreProcessingTimeInMillis = &servicePreMs
+		e.Statistics.ServiceProcessingTimeInMillis = &serviceProcessMs
+		e.Statistics.TotalExecutionTimeInMillis = &totalMs
+	}
+}
+
 func withStateChangeReason(r string) qeOpt {
 	return func(e *athenatypes.QueryExecution) { e.Status.StateChangeReason = &r }
 }
@@ -349,6 +362,8 @@ var qidQueryExecutions = map[string]*athena.GetQueryExecutionOutput{
 		athenatypes.QueryExecutionStateSucceeded, withDataScanned(123)),
 	"SELECTQueryContext_OK_QID": qe("SELECTQueryContext_OK_QID",
 		athenatypes.QueryExecutionStateSucceeded, withStatementType(athenatypes.StatementTypeDdl)),
+	"SELECTQueryContext_TIMING_QID": qe("SELECTQueryContext_TIMING_QID",
+		athenatypes.QueryExecutionStateSucceeded, withTiming(10, 20, 300, 5, 15, 350)),
 	"SELECTQueryContext_CANCEL_OK_QID": qe("SELECTQueryContext_CANCEL_OK_QID",
 		athenatypes.QueryExecutionStateQueued,
 		withStatementType(athenatypes.StatementTypeDdl), withDataScanned(123)),

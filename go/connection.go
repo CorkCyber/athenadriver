@@ -45,19 +45,24 @@ const (
 	otelDBOperationName = "db.operation.name"
 	otelServerAddress   = "server.address"
 	otelErrorType       = "error.type"
-	// otelDBSystemAthena follows the registry's aws.* namespacing
-	// (aws.dynamodb, aws.redshift, ...). "trino" — the closest registered
-	// value, since Athena's engine is Trino-derived — would be actively
-	// misleading: it implies a self-hosted Trino coordinator/worker
-	// cluster, REST protocol, and stage-level query-plan data Athena does
-	// not expose. "aws.athena" is honest about the managed service and
-	// keeps the vendor information "other_sql" would throw away.
+	// Follows the registry's aws.* namespacing (aws.dynamodb, ...). Not
+	// "trino": that implies a self-hosted cluster Athena doesn't expose.
 	otelDBSystemAthena    = "aws.athena"
 	athenaAttrQueryID     = "athena.query_id"
 	athenaAttrWorkgroup   = "athena.workgroup"
 	athenaAttrStmtType    = "athena.statement_type"
 	athenaAttrDataScanned = "athena.data_scanned_bytes"
 	athenaAttrCatalog     = "athena.catalog"
+
+	// Athena's own server-reported timing breakdown, used instead of child
+	// spans around StartQueryExecution/poll loop/first page fetch (a
+	// poll-loop span would mean one span per poll iteration: noise).
+	athenaAttrQueueTimeMs          = "athena.queue_time_ms"
+	athenaAttrPlanningTimeMs       = "athena.planning_time_ms"
+	athenaAttrEngineTimeMs         = "athena.engine_time_ms"
+	athenaAttrServicePreTimeMs     = "athena.service_preprocessing_time_ms"
+	athenaAttrServiceProcessTimeMs = "athena.service_processing_time_ms"
+	athenaAttrTotalExecutionTimeMs = "athena.total_execution_time_ms"
 )
 
 // ExecContext executes a query that doesn't return rows, such as an INSERT or UPDATE.
@@ -112,13 +117,9 @@ func (c *Connection) getHeaderlessSingleRowResultPage(ctx context.Context, qid s
 	return r, nil
 }
 
-// dbSpanNameAndOperation derives the span name and db.operation.name value
-// for a query, post pseudo-command stripping. Both must stay low-cardinality
-// (the spec requires it of db.operation.name, and a span name that varies
-// per call defeats grouping/aggregation in any real backend), so a bare
-// query ID or a QID-shaped pseudo-command uses a fixed label instead of the
-// UUID itself — a per-call-unique value is the one thing neither attribute
-// may be.
+// dbSpanNameAndOperation derives the span name and db.operation.name for a
+// query, post pseudo-command stripping. Both must stay low-cardinality: a
+// QID-shaped query gets a fixed label, never the UUID itself.
 func dbSpanNameAndOperation(pseudoCommand, query, database string) (spanName, operation string) {
 	switch {
 	case pseudoCommand == PCGetQIDStatus:
@@ -126,16 +127,10 @@ func dbSpanNameAndOperation(pseudoCommand, query, database string) (spanName, op
 	case pseudoCommand == PCStopQID:
 		operation = "STOP_QUERY_ID"
 	case IsQID(query):
-		// A query-ID-shaped query fetches a cached result set (or, for
-		// pc:get_query_id specifically, is a misuse — passing a QID where
-		// real SQL belongs — but query is still not SQL either way); never
-		// real SQL regardless of which pseudo-command, if any, preceded
-		// it. Checked independent of pseudoCommand so this catches every
-		// route to a QID-shaped query, not just the no-prefix one.
+		// QID-shaped, never real SQL. Checked independent of pseudoCommand
+		// so this also catches pc:get_query_id misused with a QID.
 		operation = "GET_QUERY_ID"
 	default:
-		// Plain queries, and pc:get_query_id given real SQL (the intended
-		// usage: submit a query and return its ID once known).
 		operation = sqlOperationName(query)
 	}
 	if operation == "" {
@@ -147,21 +142,24 @@ func dbSpanNameAndOperation(pseudoCommand, query, database string) (spanName, op
 	return operation + " " + database, operation
 }
 
-// dbErrorType returns a low-cardinality error.type value: an AWS API error
-// code (e.g. "ThrottlingException") when err wraps a modeled smithy error —
-// errors.As sees through any %w wrapping, so this still works when
-// awaitQueryCompletion or similar has wrapped the original AWS error. Falls
-// back to the Go type name for the driver's own sentinel/local errors
-// (read-only violation, invalid query, ...); their message text is not
-// used as-is since several embed a query ID, workgroup name, or raw user
-// input, which would make error.type as unbounded-cardinality as the bug
-// this replaces.
+// dbErrorType returns a low-cardinality error.type: an AWS error code
+// (e.g. "ThrottlingException", sees through %w-wrapping) or else the Go
+// type name, never the message text, since several messages embed a query
+// ID or raw user input.
 func dbErrorType(err error) string {
 	var apiErr smithy.APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.ErrorCode()
 	}
 	return fmt.Sprintf("%T", err)
+}
+
+// setInt64Attr sets key on span from an AWS SDK *int64 field, a no-op if
+// Athena did not populate it.
+func setInt64Attr(span Span, key string, value *int64) {
+	if value != nil {
+		span.SetAttr(key, *value)
+	}
 }
 
 // QueryContext is implemented to be called by `DB.Query` (QueryerContext interface).
@@ -184,13 +182,10 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 	}
 	var obs = c.tracer
 
-	// Pseudo-command parsing runs before the span starts: it never reaches
-	// Athena, so it isn't a database call, and it also decides the span
-	// name/db.operation.name below — a Tracer has no way to rename a span
-	// after StartSpan, so this must happen first. A parse error still gets
-	// a (minimal) span: every other user-visible query failure produces
-	// one, and a caller debugging a typo'd pc: command should not find
-	// tracing silent on exactly the query that failed.
+	// Parses before the span starts: not a DB call, and it decides the span
+	// name below (no rename after StartSpan). Parse errors still get a
+	// minimal span so a typo'd pc: command isn't the one failure with no
+	// trace.
 	pseudoCommand, remaining, immediate, perr := c.parsePseudoCommand(ctx, query)
 	if perr != nil {
 		_, errSpan := obs.StartSpan(ctx, "athena.query")
@@ -205,16 +200,10 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 	}
 	query = remaining
 
-	// One span per database call, per OpenTelemetry's semantic conventions
-	// for database client spans: db.system.name identifies this as a
-	// database call so a backend (Sentry, Datadog, etc.) renders it as
-	// one. db.query.text is deliberately NOT attached — the DDL
-	// interpolation path embeds literal argument values in the query
-	// text, and a trace is not a place those should land by default.
-	//
-	// StartSpan itself checks ctx for a per-query TracerKey override
-	// (e.g. a request-scoped sampling decision) before falling back to
-	// the Tracer bound to this Connection.
+	// One span per DB call (OTel db.system.name marks it as one). No
+	// db.query.text: DDL interpolation embeds literal args in the query
+	// text, and traces shouldn't get those by default. TracerKey ctx
+	// override checked inside StartSpan.
 	spanName, opName := dbSpanNameAndOperation(pseudoCommand, query, c.connector.config.DB)
 	var span Span
 	ctx, span = obs.StartSpan(ctx, spanName)
@@ -244,19 +233,14 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 		}
 	}
 	args := namedValueToValue(namedArgs)
-	// Athena receives the placeholder-form query plus ExecutionParameters —
-	// but only for statement shapes the API supports (SELECT / INSERT /
-	// CTAS / UNLOAD / WITH). Anything else (ALTER, MSCK, DROP, plain
-	// CREATE, ...) is rejected server-side with ExecutionParameters set,
-	// so those are interpolated client-side and submitted parameterless.
-	// Length validation gates on whichever form actually goes to Athena
-	// (what counts against the 262 KiB query cap).
+	// ExecutionParameters only works for statements Athena's API supports
+	// (SELECT/INSERT/CTAS/UNLOAD/WITH); others (ALTER, MSCK, DROP, plain
+	// CREATE) get client-side interpolation instead. Length validation
+	// gates on whichever form actually reaches Athena (the 262 KiB cap).
 	if len(namedArgs) > 0 {
-		// Only interpolate when the interpolated form is what goes to
-		// Athena. On the ExecutionParameters path Athena validates the
-		// placeholder count server-side; running interpolateParams there
-		// would both waste an allocation and reject valid queries, since
-		// its `?`-count check also counts `?` inside string literals.
+		// Skip on the ExecutionParameters path. Athena validates the
+		// placeholder count server-side, and interpolateParams's `?`-count
+		// check also (wrongly) counts `?` inside string literals.
 		if !executionParamsSupported(query) {
 			interpolated, ierr := c.interpolateParams(query, args)
 			if ierr != nil {
@@ -394,8 +378,14 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 		return nil, err
 	}
 	span.SetAttr(athenaAttrStmtType, string(finalExec.StatementType))
-	if finalExec.Statistics != nil && finalExec.Statistics.DataScannedInBytes != nil {
-		span.SetAttr(athenaAttrDataScanned, *finalExec.Statistics.DataScannedInBytes)
+	if stats := finalExec.Statistics; stats != nil {
+		setInt64Attr(span, athenaAttrDataScanned, stats.DataScannedInBytes)
+		setInt64Attr(span, athenaAttrQueueTimeMs, stats.QueryQueueTimeInMillis)
+		setInt64Attr(span, athenaAttrPlanningTimeMs, stats.QueryPlanningTimeInMillis)
+		setInt64Attr(span, athenaAttrEngineTimeMs, stats.EngineExecutionTimeInMillis)
+		setInt64Attr(span, athenaAttrServicePreTimeMs, stats.ServicePreProcessingTimeInMillis)
+		setInt64Attr(span, athenaAttrServiceProcessTimeMs, stats.ServiceProcessingTimeInMillis)
+		setInt64Attr(span, athenaAttrTotalExecutionTimeMs, stats.TotalExecutionTimeInMillis)
 	}
 	rows, err := NewRows(ctx, c.athenaClient, queryID, c.connector.config, obs)
 	if err != nil {
@@ -444,12 +434,10 @@ func (c *Connection) resolveWorkgroup(ctx context.Context) (Workgroup, error) {
 	if wg.Name == DefaultWGName {
 		return wg, nil
 	}
-	// The workgroup identity is fixed at connector construction, so the
-	// existence/enabled check is worth exactly one GetWorkGroup call per
-	// connector rather than one per query. wgOnce single-flights it and
-	// caches only success, so a cold-start burst of pooled connections
-	// costs one GetWorkGroup (not N against Athena's low API quota) and a
-	// transient failure doesn't poison every later query.
+	// Workgroup is fixed at construction, so wgOnce single-flights the
+	// existence/enabled check to once per connector, not per query.
+	// Caches only success, so a transient failure doesn't poison later
+	// queries.
 	_, err := c.connector.wgOnce.do(func() (struct{}, error) {
 		athenaWG, err := getWG(ctx, c.athenaClient, wg.Name)
 		if err != nil {
@@ -497,22 +485,16 @@ func isWGNotFound(err error) bool {
 	return errors.As(err, &ire) && strings.Contains(aws.ToString(ire.Message), "is not found")
 }
 
-// Ping implements driver.Pinger interface.
-// Ping is a good first step in a health check: If the Ping succeeds,
-// make a simple query, then make a complex query which depends on proper
-// DB scheme. This will make troubleshooting simpler as the error now is:
-// "We've got network connectivity, we can Ping the DB, so we have valid
-// credentials for a SELECT xxx; but ...".
+// Ping implements driver.Pinger by running "SELECT 1" — cheap, and
+// independent of any schema existing, so it isolates "network/credentials
+// are broken" from "this specific database/table is broken."
 func (c *Connection) Ping(ctx context.Context) error {
 	rows, err := c.QueryContext(ctx, "SELECT 1", nil)
 	if err != nil {
-		// database/sql retries an ErrBadConn Ping on two more connections
-		// and discards the real error, so reserve it for a conn that is
-		// genuinely unusable — QueryContext's entry guard already returns
-		// ErrBadConn for that, and it passes through here untouched. A
-		// cancelled/expired ctx reports itself; everything else (disabled
-		// workgroup, bad credentials, syntax) is surfaced verbatim so one
-		// health check costs one Athena query.
+		// database/sql retries an ErrBadConn Ping on other connections and
+		// discards the real error, so reserve it for a genuinely unusable
+		// conn (QueryContext's entry guard already returns it for that).
+		// Everything else surfaces verbatim.
 		if cerr := ctx.Err(); cerr != nil {
 			return cerr
 		}

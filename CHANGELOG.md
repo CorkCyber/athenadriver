@@ -53,6 +53,7 @@ Full migration steps live in the [README v2 migration guide](README.md#v200-migr
 
 **Results & security**
 - `Rows.StatementType()`, `Rows.SubstatementType()`, `Rows.QueryID()`.
+- `Rows.DataScannedBytes()`, `Rows.EngineVersion()`, `Rows.ExecutionTimeMillis()`.
 - `RowsColumnTypeScanType`, `RowsColumnTypeNullable`, `RowsColumnTypePrecisionScale`.
 - `Config.ResultEncryption` (SSE-S3 / SSE-KMS / CSE-KMS). Per-query override via `WithResultEncryption` or `ResultEncryptionKey` ctx.
 - `Config.ExpectedBucketOwner` (cross-account safety). Per-query override via `ExpectedBucketOwnerKey` ctx.
@@ -61,8 +62,11 @@ Full migration steps live in the [README v2 migration guide](README.md#v200-migr
 **Poll tuning**
 - `Config.ResultPollBackoffMultiplier` / `Config.ResultPollMaxInterval`.
 
+**Observability wiring**
+- `SQLConnector.WithScope`/`WithLogger`/`WithTracer` — apply a `Scope`/`*slog.Logger`/`Tracer` deterministically to every connection the connector produces. The `MetricsKey`/`LoggerKey`/`TracerKey` ctx-value forms are nondeterministic under a connection pool (database/sql's background `connectionOpener` calls `Connect` with a valueless `context.Background()`); `TracerKey` set on a single `QueryContext`/`ExecContext` call's ctx remains a reliable per-query override.
+
 **Tracing**
-- `Tracer`/`Span` interfaces + `TracerKey` ctx value, mirroring `Scope`'s metrics design. One span per `QueryContext`/`ExecContext` call, tagged CLIENT-kind with OpenTelemetry's database semantic-convention attributes (`db.system.name`, `db.namespace`, `db.operation.name`) plus `athena.query_id`/`workgroup`/`catalog`/`statement_type`/`data_scanned_bytes`, so a backend that understands those conventions (Sentry, Datadog APM, Honeycomb, Tempo, ...) renders it as a database call. `Config.TracingEnabled` (default true, DSN key `TracingEnabled`).
+- `Tracer`/`Span` interfaces + `TracerKey` ctx value, mirroring `Scope`'s metrics design. One span per `QueryContext`/`ExecContext` call, tagged CLIENT-kind with OpenTelemetry's database semantic-convention attributes (`db.system.name`, `db.namespace`, `db.operation.name`, `server.address`, `error.type`) plus `athena.query_id`/`workgroup`/`catalog`/`statement_type`/`data_scanned_bytes` and a server-reported timing breakdown (`athena.queue_time_ms`, `athena.planning_time_ms`, `athena.engine_time_ms`, `athena.service_preprocessing_time_ms`, `athena.service_processing_time_ms`, `athena.total_execution_time_ms`), so a backend that understands those conventions (Sentry, Datadog APM, Honeycomb, Tempo, ...) renders it as a database call. `Config.TracingEnabled` (default true, DSN key `TracingEnabled`). `SQLConnector.WithTracer` applies deterministically to every pooled connection; a Tracer/Span that panics or returns nil degrades to a no-op span instead of crashing the query.
 - `github.com/CorkCyber/athenadriver/scope/otel`'s `NewTracer(trace.Tracer)` bridges the above to OpenTelemetry, alongside its existing metrics adapter.
 
 ### Fixed

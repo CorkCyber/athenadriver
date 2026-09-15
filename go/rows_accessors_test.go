@@ -13,7 +13,7 @@ import (
 )
 
 // newRowsWithMetadata builds a *Rows with hand-crafted ColumnInfo and an
-// optional QueryExecution — enough to exercise the metadata accessors
+// optional QueryExecution, enough to exercise the metadata accessors
 // without going through mock paginators.
 func newRowsWithMetadata(qid string, qx *athenatypes.QueryExecution, cols []athenatypes.ColumnInfo) *Rows {
 	return &Rows{
@@ -61,6 +61,48 @@ func TestRows_SubstatementType(t *testing.T) {
 		SubstatementType: &sub,
 	}, nil)
 	assert.Equal(t, "SELECT", r.SubstatementType())
+}
+
+func TestRows_DataScannedBytes(t *testing.T) {
+	r := newRowsWithMetadata("q", nil, nil)
+	assert.Equal(t, int64(0), r.DataScannedBytes())
+
+	r = newRowsWithMetadata("q", &athenatypes.QueryExecution{}, nil)
+	assert.Equal(t, int64(0), r.DataScannedBytes())
+
+	bytes := int64(123456)
+	r = newRowsWithMetadata("q", &athenatypes.QueryExecution{
+		Statistics: &athenatypes.QueryExecutionStatistics{DataScannedInBytes: &bytes},
+	}, nil)
+	assert.Equal(t, bytes, r.DataScannedBytes())
+}
+
+func TestRows_EngineVersion(t *testing.T) {
+	r := newRowsWithMetadata("q", nil, nil)
+	assert.Equal(t, "", r.EngineVersion())
+
+	r = newRowsWithMetadata("q", &athenatypes.QueryExecution{}, nil)
+	assert.Equal(t, "", r.EngineVersion())
+
+	ver := "Athena engine version 3"
+	r = newRowsWithMetadata("q", &athenatypes.QueryExecution{
+		EngineVersion: &athenatypes.EngineVersion{EffectiveEngineVersion: &ver},
+	}, nil)
+	assert.Equal(t, ver, r.EngineVersion())
+}
+
+func TestRows_ExecutionTimeMillis(t *testing.T) {
+	r := newRowsWithMetadata("q", nil, nil)
+	assert.Equal(t, int64(0), r.ExecutionTimeMillis())
+
+	r = newRowsWithMetadata("q", &athenatypes.QueryExecution{}, nil)
+	assert.Equal(t, int64(0), r.ExecutionTimeMillis())
+
+	ms := int64(4200)
+	r = newRowsWithMetadata("q", &athenatypes.QueryExecution{
+		Statistics: &athenatypes.QueryExecutionStatistics{TotalExecutionTimeInMillis: &ms},
+	}, nil)
+	assert.Equal(t, ms, r.ExecutionTimeMillis())
 }
 
 func colInfo(name, typ string) athenatypes.ColumnInfo {

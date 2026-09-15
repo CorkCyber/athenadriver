@@ -43,13 +43,15 @@ func main() {
 	}
 	conf.MetricsEnabled = true
 
-	db, _ := sql.Open(drv.DriverName, conf.Stringify())
+	// 3. Attach the otel Scope adapter via WithScope: applies
+	// deterministically to every connection this connector produces,
+	// unlike the ctx-value (MetricsKey) form, which pooled connections
+	// pick up inconsistently.
+	connector := drv.NewConnector(conf).WithScope(otelscope.New(otel.Meter("athenadriver_example")))
+	db := sql.OpenDB(connector)
 
-	// 3. Attach the otel Scope adapter to context.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	ctx = context.WithValue(ctx, drv.MetricsKey,
-		otelscope.New(otel.Meter("athenadriver_example")))
 
 	rows, err := db.QueryContext(ctx, "select count(*) from sampledb.elb_logs")
 	if err != nil {

@@ -25,13 +25,21 @@ span. `db.query.text` is deliberately omitted — the DDL-interpolation path
 embeds literal argument values in the query text, and a trace should not
 leak those by default.
 
-- [ ] Finer-grained child spans inside one query's span — `StartQueryExecution`,
-      the poll loop (as one span, not one per poll iteration), and the first
-      `GetQueryResults` page fetch — for backends that want to see where time
-      went inside a single query. NOT a span per row/cell in `convertRow`;
-      that would be pathological on a large result set. Nice-to-have, not
-      required for a backend to recognize and render the top-level span.
-- [ ] Structured query metrics — query ID, scan bytes, engine version, execution time. Already partly in `cost.go`; expose via `Rows` accessor or context callback.
+Done (decided against child spans): "where did the query time go" is
+answered via `athena.queue_time_ms`/`planning_time_ms`/`engine_time_ms`/
+`service_preprocessing_time_ms`/`service_processing_time_ms`/
+`total_execution_time_ms` span attributes, sourced from Athena's own
+server-reported `QueryExecutionStatistics` — authoritative, zero extra
+spans/API calls. Child spans around `StartQueryExecution`/the poll
+loop/the first `GetQueryResults` page were considered and rejected: a
+poll-loop child span would mean one span per poll iteration on a slow
+query (noise), and the other two are single API calls the Statistics
+breakdown already explains better than wall-clock timing would.
+
+Done: structured query metrics accessors — `Rows.DataScannedBytes()`,
+`Rows.EngineVersion()`, `Rows.ExecutionTimeMillis()`, alongside the
+pre-existing `QueryID()`/`StatementType()`/`SubstatementType()`. All read
+from the `queryExecution` metadata `NewRows` already fetches and stores.
 
 ## Bulk read performance
 

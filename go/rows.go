@@ -34,11 +34,9 @@ var (
 	scanTypeUnknown = reflect.TypeFor[any]()
 )
 
-// athenaTypeMeta describes how the driver surfaces a single Athena column
-// type to database/sql callers: the reflect.Type returned from
-// RowsColumnTypeScanType, the zero value handed back when
-// MissingAsDefault is enabled and a row has no value for the column, and
-// the parse step (string -> Go value).
+// athenaTypeMeta is how the driver surfaces one Athena column type to
+// database/sql: the scan reflect.Type, the MissingAsDefault zero value, and
+// the string-to-Go parse func.
 type athenaTypeMeta struct {
 	scanType   reflect.Type
 	defaultVal any
@@ -99,16 +97,13 @@ func parseString(s string) (any, error) { return s, nil }
 var timeMeta = athenaTypeMeta{scanTypeTime, time.Time{}, parseTime}
 var stringMeta = athenaTypeMeta{scanTypeString, "", parseString}
 
-// athenaTypes is the single source of truth for Athena column types the
-// driver recognizes. ColumnTypeScanType and the per-column decoder cache
-// (colMetas) both index into this map. Types listed here as scanTypeString are returned to
-// database/sql as Go strings (Athena's text-shaped types and anything the
-// driver does not specially decode). A type absent from the map is not an
-// error: buildColMetas falls back to stringMeta so an unrecognized column
-// decodes as its raw string instead of failing the whole result set.
+// athenaTypes is the single source of truth for recognized Athena column
+// types; ColumnTypeScanType and colMetas both index into it. A type absent
+// here is not an error: buildColMetas falls back to stringMeta, decoding as
+// a raw string instead of failing the result set.
 var athenaTypes = map[string]athenaTypeMeta{
 	// defaultVal must be the same Go type the parse func returns (and that
-	// ColumnTypeScanType advertises) — otherwise a missing cell and a present
+	// ColumnTypeScanType advertises); otherwise a missing cell and a present
 	// cell in the same column scan as different types, and untyped 0 boxes to
 	// plain int, which is not a valid driver.Value.
 	"tinyint":  {scanTypeInt8, int8(0), parseIntBits(8)},
@@ -163,11 +158,10 @@ type Rows struct {
 	// map lookup + string-switch on *columnInfo.Type. nil entries fall
 	// back to the "unknown type" error path.
 	colMetas []*athenaTypeMeta
-	// queryExecution is the terminal-state QueryExecution returned by
-	// GetQueryExecution at the end of the polling loop. Used by the
-	// StatementType / SubstatementType accessors and any caller that needs
-	// scan-bytes or engine-version metadata. May be nil for Rows returned
-	// from cached-query (QID-direct) paths or non-ops helpers.
+	// queryExecution is the terminal-state QueryExecution from GetQueryExecution
+	// at the end of the polling loop, used by StatementType / SubstatementType
+	// and other metadata accessors. May be nil for Rows from cached-query
+	// (QID-direct) paths or non-ops helpers.
 	queryExecution *athenatypes.QueryExecution
 }
 
@@ -195,6 +189,37 @@ func (r *Rows) SubstatementType() string {
 		return ""
 	}
 	return *r.queryExecution.SubstatementType
+}
+
+// DataScannedBytes returns the number of bytes Athena scanned for this
+// query, for cost tracking or logging. Returns 0 if the underlying query
+// execution metadata is not available (e.g. Rows came from a cached-result
+// path) or Athena did not populate the field.
+func (r *Rows) DataScannedBytes() int64 {
+	if r.queryExecution == nil || r.queryExecution.Statistics == nil || r.queryExecution.Statistics.DataScannedInBytes == nil {
+		return 0
+	}
+	return *r.queryExecution.Statistics.DataScannedInBytes
+}
+
+// EngineVersion returns the Athena engine version that ran the query (e.g.
+// "Athena engine version 3"). Returns "" if the underlying query execution
+// metadata is not available or Athena did not populate the field.
+func (r *Rows) EngineVersion() string {
+	if r.queryExecution == nil || r.queryExecution.EngineVersion == nil || r.queryExecution.EngineVersion.EffectiveEngineVersion == nil {
+		return ""
+	}
+	return *r.queryExecution.EngineVersion.EffectiveEngineVersion
+}
+
+// ExecutionTimeMillis returns how long Athena took to run the query, in
+// milliseconds. Returns 0 if the underlying query execution metadata is not
+// available or Athena did not populate the field.
+func (r *Rows) ExecutionTimeMillis() int64 {
+	if r.queryExecution == nil || r.queryExecution.Statistics == nil || r.queryExecution.Statistics.TotalExecutionTimeInMillis == nil {
+		return 0
+	}
+	return *r.queryExecution.Statistics.TotalExecutionTimeInMillis
 }
 
 // NewRows is to create a new Rows.
@@ -235,10 +260,10 @@ func (r *Rows) Columns() []string {
 func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
 	colInfo := r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo[index]
 	if colInfo.Type == nil {
-		// Treat a missing type the same way the sibling ColumnType* methods
-		// treat unknown shapes — return a zero value rather than logging an
-		// error, since the sql framework calls these on every column and a
-		// nil here is benign at the call site.
+		// Treat a missing type like the sibling ColumnType* methods treat
+		// unknown shapes: return a zero value rather than logging an error,
+		// since the sql framework calls these on every column and a nil
+		// here is benign at the call site.
 		return ""
 	}
 	return *colInfo.Type
@@ -291,7 +316,7 @@ func (r *Rows) Next(dest []driver.Value) error {
 	}
 	if len(r.ResultOutput.ResultSet.Rows) == 0 {
 		if r.paginator == nil || !r.paginator.HasMorePages() {
-			// no paginator (e.g. NewNonOpsRows path) or no more pages — done.
+			// no paginator (e.g. NewNonOpsRows path), or no more pages: done.
 			r.reachedLastPage = true
 			return io.EOF
 		}
@@ -316,7 +341,7 @@ func (r *Rows) Next(dest []driver.Value) error {
 
 // fetchNextPage retrieves the next result page carrying at least one usable
 // row. A page can come back empty mid-stream while the paginator still has a
-// NextToken, so keep pulling until rows arrive or the pages run out —
+// NextToken, so keep pulling until rows arrive or the pages run out:
 // stopping at the first empty page would silently truncate the result set.
 func (r *Rows) fetchNextPage() error {
 	for {
@@ -346,8 +371,8 @@ func (r *Rows) fetchOnePage() error {
 		return err
 	}
 	// Athena can hand back a page with no ResultSet / ResultSetMetadata at
-	// all. Normalize it to an empty result set here — the single point every
-	// path converges on — so Columns/Next/ColumnType* can deref freely.
+	// all. Normalize it to an empty result set here (the single point every
+	// path converges on) so Columns/Next/ColumnType* can deref freely.
 	if out == nil || out.ResultSet == nil || out.ResultSet.ResultSetMetadata == nil {
 		r.ResultOutput = &athena.GetQueryResultsOutput{
 			ResultSet: &athenatypes.ResultSet{
@@ -485,10 +510,9 @@ func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.
 		r.buildColMetas(columns)
 	}
 	// Iterate ret, not rdata: database/sql reuses the same dest slice across
-	// Next calls, so every slot must be written. A row with fewer datums than
-	// columns feeds a nil rawValue into convertCell, which applies the
-	// configured MissingAs* policy instead of leaving the previous row's value
-	// behind.
+	// Next calls, so every slot must be written. A short row feeds a nil
+	// rawValue into convertCell, applying the configured MissingAs* policy
+	// instead of leaving the previous row's value behind.
 	for i := range ret {
 		if i >= len(columns) || i >= len(r.colMetas) {
 			ret[i] = nil
@@ -522,7 +546,7 @@ func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.
 // columnInfo is taken by pointer: it is ~88 bytes and this runs once per cell
 // of every row, but only two pointer fields are ever read.
 func (r *Rows) convertCell(columnInfo *athenatypes.ColumnInfo, meta *athenaTypeMeta, rawValue *string, driverConfig *Config) (any, error) {
-	// Name and Type are both optional in the SDK — resolve once, guarded.
+	// Name and Type are both optional in the SDK: resolve once, guarded.
 	colName := aws.ToString(columnInfo.Name)
 	typeName := aws.ToString(columnInfo.Type)
 	if maskedValue, masked := driverConfig.CheckColumnMasked(colName); masked { // "comma ok" idiom

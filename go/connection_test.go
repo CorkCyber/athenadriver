@@ -193,7 +193,7 @@ func TestQueryContext_WhitespaceFreeSQLIsNotMisroutedAsQID(t *testing.T) {
 // TestQueryContext_LiteralQuestionMark is the regression guard for
 // running interpolateParams (and its naive `?`-counting check) on the
 // ExecutionParameters path: a `?` inside a string literal is not a
-// placeholder, and Athena — not the driver — validates placeholder count.
+// placeholder, and Athena (not the driver) validates placeholder count.
 func TestQueryContext_LiteralQuestionMark(t *testing.T) {
 	t.Parallel()
 	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
@@ -267,6 +267,29 @@ func TestQueryContext_TracesAsDatabaseSpan(t *testing.T) {
 	assert.Contains(t, tracer.span.attrs, athenaAttrStmtType)
 	assert.Empty(t, tracer.span.errs)
 	assert.True(t, tracer.span.ended)
+}
+
+// TestQueryContext_TracesExecutionTimingBreakdown proves Athena's own
+// server-reported timing breakdown (queue/planning/engine/service time)
+// lands on the span as attributes: the authoritative "where did the time
+// go" signal, used instead of hand-rolled child spans.
+func TestQueryContext_TracesExecutionTimingBreakdown(t *testing.T) {
+	t.Parallel()
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		cfg.WorkGroup = nil
+	})
+	tracer := &recordingTracer{}
+	c.tracer.SetTracer(tracer)
+
+	_, err := c.QueryContext(context.Background(), "SELECTQueryContext_TIMING x", nil)
+	assert.Nil(t, err)
+
+	assert.EqualValues(t, 10, tracer.span.attrs[athenaAttrQueueTimeMs])
+	assert.EqualValues(t, 20, tracer.span.attrs[athenaAttrPlanningTimeMs])
+	assert.EqualValues(t, 300, tracer.span.attrs[athenaAttrEngineTimeMs])
+	assert.EqualValues(t, 5, tracer.span.attrs[athenaAttrServicePreTimeMs])
+	assert.EqualValues(t, 15, tracer.span.attrs[athenaAttrServiceProcessTimeMs])
+	assert.EqualValues(t, 350, tracer.span.attrs[athenaAttrTotalExecutionTimeMs])
 }
 
 // TestDBSpanNameAndOperation pins the low-cardinality contract for QID-shaped
@@ -351,11 +374,9 @@ func TestDbErrorType(t *testing.T) {
 	assert.Equal(t, "ThrottlingException", dbErrorType(fmt.Errorf("wrapped: %w", apiErr)))
 }
 
-// countingTracer/countingSpan are a concurrency-safe recording double: real
-// pooled usage shares ONE Tracer instance (set once via WithTracer) across
-// every connection database/sql opens, so a chaos test simulating that pool
-// needs a double that itself tolerates concurrent StartSpan calls — unlike
-// recordingTracer, which stores one shared, unsynchronized *recordingSpan.
+// countingTracer/countingSpan: concurrency-safe recording double. Pooled
+// usage shares one Tracer across connections, so this chaos test needs a
+// double that tolerates concurrent StartSpan (recordingTracer doesn't).
 type countingTracer struct {
 	started atomic.Int64
 	ended   atomic.Int64
@@ -374,14 +395,10 @@ func (s *countingSpan) SetAttr(string, any) {}
 func (s *countingSpan) RecordError(error)   {}
 func (s *countingSpan) End()                { s.ended.Add(1) }
 
-// TestQueryContext_ConcurrentPooledQueries_RaceFree chaos-tests the pooled
-// scenario every prior finding in this area was about: many connections
-// (as database/sql's pool would open under load), all sharing the SAME
-// Tracer instance via WithTracer/SetTracer, hit with a concurrent mix of
-// successful queries, query failures, and pseudo-command parse failures.
-// Run with -race, this is the completeness check for every span-lifecycle
-// fix in this file: no data race, and every started span is ended exactly
-// once — including on every error path.
+// TestQueryContext_ConcurrentPooledQueries_RaceFree: many connections
+// sharing one Tracer (WithTracer/SetTracer), concurrent mix of success/
+// error/parse-failure queries. Run with -race: no data race, every started
+// span ends exactly once.
 func TestQueryContext_ConcurrentPooledQueries_RaceFree(t *testing.T) {
 	shared := &countingTracer{}
 	const goroutines = 50
@@ -1162,7 +1179,7 @@ func TestResolveWorkgroup_ConcurrentCreationRecovery(t *testing.T) {
 // TestResolveWorkgroup_ConcurrentHammer runs resolveWorkgroup from 32
 // goroutines on one connector (run under -race). Cold start: every caller
 // must succeed even though they all observe the same miss. Warm: the
-// verified flag must make every later call a no-op — zero AWS traffic.
+// verified flag must make every later call a no-op: zero AWS traffic.
 func TestResolveWorkgroup_ConcurrentHammer(t *testing.T) {
 	t.Parallel()
 	const n = 32
@@ -1455,8 +1472,8 @@ func (nilQIDClient) StartQueryExecution(context.Context, *athena.StartQueryExecu
 // TestResolveWorkgroup_ConcurrentQueryContext is the pooled-connection
 // version of the hammer: N distinct Connections sharing one SQLConnector
 // all issue their first query at once. The workgroup check must be
-// single-flighted across the whole pool — one GetWorkGroup, one
-// CreateWorkGroup — or an Athena API throttle surfaces as failed queries.
+// single-flighted across the whole pool (one GetWorkGroup, one
+// CreateWorkGroup), or an Athena API throttle surfaces as failed queries.
 func TestResolveWorkgroup_ConcurrentQueryContext(t *testing.T) {
 	t.Parallel()
 	const n = 32
@@ -1472,7 +1489,7 @@ func TestResolveWorkgroup_ConcurrentQueryContext(t *testing.T) {
 	var wg sync.WaitGroup
 	for range n {
 		wg.Go(func() {
-			// A fresh Connection per goroutine, same connector and client —
+			// A fresh Connection per goroutine, same connector and client:
 			// exactly what a database/sql pool cold start looks like.
 			c := &Connection{
 				athenaClient: nm,

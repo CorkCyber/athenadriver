@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -69,7 +70,10 @@ func (c *Connection) buildExecutionParams(args []driver.Value) ([]string, error)
 			// For DATE/TIME/TIMESTAMP, it is better to pass in string arguments with a typecast. Refer to the string
 			// case below.
 			// Matches interpolateParams() behavior.
-			val = "'0000-00-00'" // Special-cased.
+			// Trino/Athena has no zero-date concept: DATE '0000-00-00' is a
+			// parse error and the bare string matches nothing, so a zero
+			// time.Time is NULL, same as a nil argument above.
+			val = "NULL"
 			if !v.IsZero() {
 				v := v.In(time.UTC)
 				v = v.Add(time.Nanosecond * 500) // To round under microsecond
@@ -100,22 +104,45 @@ func (c *Connection) buildExecutionParams(args []driver.Value) ([]string, error)
 	return executionParams, nil
 }
 
-// placeholderIndexes returns the byte offset of every `?` in query that sits
-// OUTSIDE a single-quoted string literal. A `?` inside a literal (e.g.
-// `WHERE note = 'imported?'`) is data, not a placeholder: substituting it
-// would inject the argument's own quotes into the middle of a literal and
-// flip quoting parity for the rest of the statement. Trino escapes a quote
-// inside a literal by doubling it, which the plain toggle handles: the second
-// quote of the pair re-enters the literal.
+// placeholderIndexes returns the byte offset of every `?` in query that is a
+// real placeholder, i.e. one that sits OUTSIDE a single-quoted string literal
+// ('it?'), a double-quoted identifier ("weird?column"), a `--` line comment
+// and a `/* */` block comment. A `?` in any of those is data or prose, not a
+// placeholder: substituting it would inject the argument into the middle of a
+// literal/identifier/comment and shift every later argument by one.
+// Trino escapes a quote inside a literal or identifier by doubling it, which
+// the plain toggle handles: the second quote of the pair re-enters it.
 func placeholderIndexes(query string) []int {
 	var idx []int
-	inLiteral := false
+	inString, inIdent := false, false
 	for i := 0; i < len(query); i++ {
 		switch query[i] {
 		case '\'':
-			inLiteral = !inLiteral
+			if !inIdent {
+				inString = !inString
+			}
+		case '"':
+			if !inString {
+				inIdent = !inIdent
+			}
+		case '-':
+			if !inString && !inIdent && i+1 < len(query) && query[i+1] == '-' {
+				if nl := strings.IndexByte(query[i:], '\n'); nl < 0 {
+					return idx // comment runs to end of query
+				} else {
+					i += nl
+				}
+			}
+		case '/':
+			if !inString && !inIdent && i+1 < len(query) && query[i+1] == '*' {
+				end := strings.Index(query[i+2:], "*/")
+				if end < 0 {
+					return idx // unterminated block comment
+				}
+				i += 2 + end + 1
+			}
 		case '?':
-			if !inLiteral {
+			if !inString && !inIdent {
 				idx = append(idx, i)
 			}
 		}
@@ -161,7 +188,7 @@ func (c *Connection) interpolateParams(query string, args []driver.Value) (strin
 			queryBuffer = strconv.AppendBool(queryBuffer, v)
 		case time.Time:
 			if v.IsZero() {
-				queryBuffer = append(queryBuffer, "'0000-00-00'"...)
+				queryBuffer = append(queryBuffer, "NULL"...)
 			} else {
 				v := v.In(time.UTC).Add(time.Nanosecond * 500)
 				layout := "'2006-01-02 15:04:05'"

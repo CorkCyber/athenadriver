@@ -12,25 +12,20 @@ type Statement struct {
 	connection *Connection
 	closed     bool
 	query      string
-	numInput   int
 }
 
 // Close is to close an open statement. Idempotent per driver.Stmt
 // contract (see golang/go#16019); returning ErrBadConn on the second
 // call causes database/sql to evict the underlying connection.
 func (s *Statement) Close() error {
-	s.query = ""
 	s.closed = true
-	s.numInput = 0
 	return nil
 }
 
-// NumInput returns -1: "the driver doesn't know its number of placeholders",
-// so database/sql skips its own arg-count check (see driver.Stmt). Counting
-// `?` with strings.Count is quote-blind — it rejects valid statements that
-// contain a literal `?` inside a string literal. Validation is left to Athena
-// (which checks the ExecutionParameters count server-side) and to
-// interpolateParams' quote-aware count on the DDL path.
+// NumInput returns -1 so database/sql skips its own arg-count check.
+// strings.Count on `?` is quote-blind and would reject a literal `?` inside
+// a string. Athena validates ExecutionParameters count server-side;
+// interpolateParams does its own quote-aware count on the DDL path.
 func (s *Statement) NumInput() int {
 	return -1
 }

@@ -135,6 +135,48 @@ func TestDateTime_LocationCache(t *testing.T) {
 	assert.False(t, ok)
 }
 
+// TestDateTime_ScanTimeNumericOffset pins that a numeric UTC offset — what
+// Trino renders when the session zone is an offset, not an IANA name — parses
+// to the correct instant instead of failing in time.LoadLocation.
+func TestDateTime_ScanTimeNumericOffset(t *testing.T) {
+	for _, tt := range []struct {
+		in  string
+		utc string
+	}{
+		{"2021-06-01 10:00:00.000 -08:00", "2021-06-01 18:00:00"},
+		{"2021-06-01 10:00:00.000 +05:30", "2021-06-01 04:30:00"},
+		{"2021-06-01 10:00:00 +00:00", "2021-06-01 10:00:00"},
+	} {
+		r, e := scanTime(tt.in)
+		assert.NoError(t, e, tt.in)
+		assert.True(t, r.Valid, tt.in)
+		assert.Equal(t, tt.utc, r.Time.UTC().Format("2006-01-02 15:04:05"), tt.in)
+	}
+
+	// Near-miss offset shapes must still be rejected, not silently accepted.
+	for _, in := range []string{
+		"2021-06-01 10:00:00 -8:00", "2021-06-01 10:00:00 +0a:00",
+	} {
+		r, e := scanTime(in)
+		assert.Error(t, e, in)
+		assert.False(t, r.Valid, in)
+	}
+}
+
+// TestDateTime_ShapeDispatchAllocs pins that date-only and time-only values
+// skip the failed layout attempts that used to allocate a *time.ParseError
+// each (2 allocs for a TIME value, 1 for a DATE value) before matching.
+func TestDateTime_ShapeDispatchAllocs(t *testing.T) {
+	for _, in := range []string{"2001-08-22", "01:02:03", "01:02:03.456"} {
+		n := testing.AllocsPerRun(100, func() {
+			if r, _ := scanTime(in); !r.Valid {
+				t.Fatalf("value %q failed to parse", in)
+			}
+		})
+		assert.Zero(t, n, "value %q allocated %v times", in, n)
+	}
+}
+
 func TestDateTime_ScanTimeTrailingSpace(t *testing.T) {
 	for _, tt := range []struct {
 		in    string

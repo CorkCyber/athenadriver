@@ -3,6 +3,7 @@
 package athenadriver
 
 import (
+	"context"
 	"database/sql/driver"
 	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 	"math"
@@ -16,12 +17,41 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// Athena accepts ExecutionParameters for CTAS but not for CREATE VIEW ... AS
+// SELECT, which the old bare-`as` heuristic wrongly matched.
+func TestExecutionParamsSupported_CreateViewVsCTAS(t *testing.T) {
+	assert.True(t, executionParamsSupported("CREATE TABLE t AS SELECT * FROM t2 WHERE x = ?"))
+	assert.False(t, executionParamsSupported("CREATE VIEW v AS SELECT * FROM t WHERE x = ?"))
+	assert.False(t, executionParamsSupported("CREATE OR REPLACE VIEW v AS SELECT ?"))
+	assert.False(t, executionParamsSupported("create"))
+
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		cfg.WorkGroup = nil
+	})
+	nm := c.athenaClient.(*mockAthenaClient)
+
+	// CVAS: interpolated client-side, submitted parameterless.
+	//nolint:errcheck // mock has no canned result for these queries
+	_, _ = c.QueryContext(context.Background(), "CREATE VIEW v AS SELECT * FROM t WHERE x = ?",
+		[]driver.NamedValue{{Value: "a"}})
+	assert.Equal(t, "CREATE VIEW v AS SELECT * FROM t WHERE x = 'a'", *nm.lastStartInput.QueryString)
+	assert.Nil(t, nm.lastStartInput.ExecutionParameters)
+
+	// CTAS: still routed through ExecutionParameters.
+	_, _ = c.QueryContext(context.Background(), "CREATE TABLE t AS SELECT * FROM t2 WHERE x = ?",
+		[]driver.NamedValue{{Value: "a"}})
+	assert.Equal(t, "CREATE TABLE t AS SELECT * FROM t2 WHERE x = ?", *nm.lastStartInput.QueryString)
+	assert.Equal(t, []string{"'a'"}, nm.lastStartInput.ExecutionParameters)
+}
+
 func TestColsToCSV(t *testing.T) {
 	sqlRows := sqlmock.NewRows([]string{"one", "two", "three"})
 	rows := mockRowsToSQLRows(sqlRows)
 	expected := ColsToCSV(rows)
 	assert.Equal(t, "one,two,three\n", expected)
 	assert.Equal(t, "", ColsToCSV(nil))
+	assert.Equal(t, "one\n", ColsToCSV(mockRowsToSQLRows(sqlmock.NewRows([]string{"one"}))))
+	assert.Equal(t, "", ColsToCSV(mockRowsToSQLRows(sqlmock.NewRows(nil))))
 }
 
 func TestRowsToCSV(t *testing.T) {

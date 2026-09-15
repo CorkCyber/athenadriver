@@ -45,11 +45,6 @@ type athenaTypeMeta struct {
 	parse      func(string) (any, error)
 }
 
-// athenaTypes is the single source of truth for Athena column types the
-// driver recognizes. ColumnTypeScanType and the per-column decoder cache
-// (colMetas) both index into this map. Types listed here as scanTypeString are returned to
-// database/sql as Go strings (Athena's text-shaped types and anything the
-// driver does not specially decode).
 func parseIntBits(bits int) func(string) (any, error) {
 	return func(s string) (any, error) {
 		n, err := strconv.ParseInt(s, 10, bits)
@@ -104,6 +99,13 @@ func parseString(s string) (any, error) { return s, nil }
 var timeMeta = athenaTypeMeta{scanTypeTime, time.Time{}, parseTime}
 var stringMeta = athenaTypeMeta{scanTypeString, "", parseString}
 
+// athenaTypes is the single source of truth for Athena column types the
+// driver recognizes. ColumnTypeScanType and the per-column decoder cache
+// (colMetas) both index into this map. Types listed here as scanTypeString are returned to
+// database/sql as Go strings (Athena's text-shaped types and anything the
+// driver does not specially decode). A type absent from the map is not an
+// error: buildColMetas falls back to stringMeta so an unrecognized column
+// decodes as its raw string instead of failing the whole result set.
 var athenaTypes = map[string]athenaTypeMeta{
 	"tinyint":  {scanTypeInt8, 0, parseIntBits(8)},
 	"smallint": {scanTypeInt16, 0, parseIntBits(16)},
@@ -137,6 +139,8 @@ var athenaTypes = map[string]athenaTypeMeta{
 	"array":                  stringMeta,
 	"map":                    stringMeta,
 	"unknown":                stringMeta,
+	"uuid":                   stringMeta, // Trino / engine v3
+	"geometry":               stringMeta, // Trino / engine v3 geospatial
 }
 
 // Rows defines rows in AWS Athena ResultSet.
@@ -199,8 +203,13 @@ func NewRows(ctx context.Context, client AthenaClient, queryID string, driverCon
 		config:    driverConfig,
 		tracer:    obs,
 		pageCount: -1,
+		// StopOnDuplicateToken: Athena can echo back an unchanged NextToken on
+		// an empty page; without this the fetchNextPage loop would call
+		// GetQueryResults forever.
 		paginator: athena.NewGetQueryResultsPaginator(client, &athena.GetQueryResultsInput{
 			QueryExecutionId: aws.String(queryID),
+		}, func(o *athena.GetQueryResultsPaginatorOptions) {
+			o.StopOnDuplicateToken = true
 		}),
 	}
 	if err := r.fetchNextPage(); err != nil {
@@ -357,39 +366,46 @@ func (r *Rows) fetchOnePage() error {
 	//     _col0
 	//     Partitions not in metastore:    elb_logs:2015/01/01     elb_logs:2015/01/02     elb_logs:2015/01/03
 	//       elb_logs:2015/01/04     elb_logs:2015/01/05     elb_logs:2015/01/06     elb_logs:2015/01/07
-	if r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo != nil {
-		rowLen := len(r.ResultOutput.ResultSet.Rows)
-		colLen := len(r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo)
-		if rowLen > 0 {
-			rowColLen := len(r.ResultOutput.ResultSet.Rows[0].Data)
-			if colLen < rowColLen {
-				for i := range rowColLen - colLen {
-					colName := "_col" + strconv.Itoa(i+colLen)
-					colType := "string"
-					colInfo := newColumnInfo(colName, colType)
-					r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo = append(r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo,
-						colInfo)
+	// No ColumnInfo != nil guard here on purpose: the synthesize-column-names
+	// workaround above exists precisely for the ColumnInfo-absent case, and
+	// every length check below is nil-safe (len(nil slice) == 0).
+	rowLen := len(r.ResultOutput.ResultSet.Rows)
+	colLen := len(r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo)
+	if rowLen > 0 {
+		rowColLen := len(r.ResultOutput.ResultSet.Rows[0].Data)
+		if colLen < rowColLen {
+			for i := range rowColLen - colLen {
+				colName := "_col" + strconv.Itoa(i+colLen)
+				colType := "string"
+				colInfo := newColumnInfo(colName, colType)
+				r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo = append(r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo,
+					colInfo)
+			}
+		} else if colLen > rowColLen && rowColLen == 1 {
+			for k := range rowLen {
+				// Ragged page: the split decision came from Rows[0], but a
+				// later row can carry zero datums. Skip it rather than
+				// indexing Data[0].
+				if len(r.ResultOutput.ResultSet.Rows[k].Data) == 0 {
+					continue
 				}
-			} else if colLen > rowColLen && rowColLen == 1 {
-				for k := range rowLen {
-					items := strings.Split(aws.ToString(r.ResultOutput.ResultSet.Rows[k].Data[0].VarCharValue), "\t")
-					if len(items) == colLen {
-						for i, v := range items {
-							items[i] = strings.TrimSpace(v)
-						}
-						r.ResultOutput.ResultSet.Rows[k] = newRow(colLen, items)
+				items := strings.Split(aws.ToString(r.ResultOutput.ResultSet.Rows[k].Data[0].VarCharValue), "\t")
+				if len(items) == colLen {
+					for i, v := range items {
+						items[i] = strings.TrimSpace(v)
 					}
+					r.ResultOutput.ResultSet.Rows[k] = newRow(colLen, items)
 				}
 			}
-		} else if rowLen == 0 && colLen == 1 && r.ResultOutput.UpdateCount != nil {
-			if *r.ResultOutput.UpdateCount > 0 {
-				if aws.ToString(r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo[0].Name) == "rows" {
-					// For DML's INSERT INTO, DDL's CTAS
-					updateCount := strconv.FormatInt(*r.ResultOutput.UpdateCount, 10)
-					rData := athenatypes.Datum{VarCharValue: &updateCount}
-					aRow := athenatypes.Row{Data: []athenatypes.Datum{rData}}
-					r.ResultOutput.ResultSet.Rows = append(r.ResultOutput.ResultSet.Rows, aRow)
-				}
+		}
+	} else if colLen == 1 && r.ResultOutput.UpdateCount != nil {
+		if *r.ResultOutput.UpdateCount > 0 {
+			if aws.ToString(r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo[0].Name) == "rows" {
+				// For DML's INSERT INTO, DDL's CTAS
+				updateCount := strconv.FormatInt(*r.ResultOutput.UpdateCount, 10)
+				rData := athenatypes.Datum{VarCharValue: &updateCount}
+				aRow := athenatypes.Row{Data: []athenatypes.Datum{rData}}
+				r.ResultOutput.ResultSet.Rows = append(r.ResultOutput.ResultSet.Rows, aRow)
 			}
 		}
 	}
@@ -446,7 +462,15 @@ func (r *Rows) buildColMetas(columns []athenatypes.ColumnInfo) {
 		}
 		if m, ok := athenaTypes[*c.Type]; ok {
 			r.colMetas[i] = &m
+			continue
 		}
+		// Unrecognized type (a newer engine-v3 / Trino type, say): decode it
+		// as its raw string rather than failing every row of the result set.
+		// The counter keeps the miss visible.
+		r.tracer.Scope().Counter(DriverName + ".failure.convertvalue.type").Inc(1)
+		r.tracer.Log(WarnLevel, "unknown column data type, decoding as string",
+			slog.String("columnInfo.Type", *c.Type))
+		r.colMetas[i] = &stringMeta
 	}
 }
 
@@ -521,9 +545,12 @@ func (r *Rows) convertCell(columnInfo athenatypes.ColumnInfo, meta *athenaTypeMe
 		return nil, fmt.Errorf("missing data at column %s", colName)
 	}
 	if meta == nil {
+		// Unreported or unrecognized type: hand back the raw string instead of
+		// aborting the whole result set over one column.
 		r.tracer.Scope().Counter(DriverName + ".failure.convertvalue.type").Inc(1)
-		r.tracer.Log(ErrorLevel, "column data type error", slog.String("columnInfo.Type", typeName))
-		return nil, fmt.Errorf("unknown type `%s` with value %s", typeName, *rawValue)
+		r.tracer.Log(WarnLevel, "column data type unknown, passing through as string",
+			slog.String("columnInfo.Type", typeName))
+		return *rawValue, nil
 	}
 	val, err := meta.parse(*rawValue)
 	if err != nil {

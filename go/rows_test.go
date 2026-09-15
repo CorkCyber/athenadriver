@@ -401,11 +401,21 @@ func TestRows_AthenaTypeToGoType(t *testing.T) {
 		assert.Nil(t, g)
 	}
 
+	// uuid / geometry (engine v3) decode as strings
+	for _, s := range []string{"uuid", "geometry"} {
+		c = newColumnInfo("a", s)
+		rv = "abc"
+		g, e = r.athenaTypeToGoType(c, &rv, testConf)
+		assert.Nil(t, e)
+		assert.Equal(t, "abc", g)
+	}
+
+	// an unrecognized type is passed through as its raw string, not an error
 	c = newColumnInfo("a", "some_weird_type")
 	rv = "123"
 	g, e = r.athenaTypeToGoType(c, &rv, testConf)
-	assert.NotNil(t, e)
-	assert.Nil(t, g)
+	assert.Nil(t, e)
+	assert.Equal(t, "123", g)
 
 	// missing data - rawValue is nil
 	c = newColumnInfo("a", "integer")
@@ -614,4 +624,104 @@ func TestRows_NewRows(t *testing.T) {
 		cnt++
 	}
 
+}
+
+// A page whose columns outnumber a single-datum first row triggers the
+// tab-split path; a later row carrying zero datums must be skipped, not
+// indexed into.
+func TestRows_RaggedTabSplitPage(t *testing.T) {
+	testConf := NewNoOpsConfig()
+	m := newMockAthenaClient()
+	cols := []athenatypes.ColumnInfo{
+		newColumnInfo("c1", "string"),
+		newColumnInfo("c2", "string"),
+		newColumnInfo("c3", "string"),
+	}
+	m.queryToResultsGenMap["ragged_tab_split"] = singlePage(buildPage(cols,
+		[]athenatypes.Row{
+			{Data: []athenatypes.Datum{{VarCharValue: aws.String("a\tb\tc")}}},
+			{Data: nil}, // no datums at all: used to panic
+			{Data: []athenatypes.Datum{{VarCharValue: aws.String("d\te\tf")}}},
+		}, -1))
+
+	r, e := NewRows(context.Background(), m, "ragged_tab_split", testConf,
+		NewObservability(testConf, nil, nil))
+	assert.Nil(t, e)
+	dest := make([]driver.Value, 3)
+	assert.Nil(t, r.Next(dest))
+	assert.Equal(t, []driver.Value{"a", "b", "c"}, dest)
+	// the empty row survives (no panic) and every slot falls to the
+	// configured missing-value policy rather than leaking row 1's values.
+	assert.Nil(t, r.Next(dest))
+	assert.Equal(t, []driver.Value{"", "", ""}, dest)
+	assert.Nil(t, r.Next(dest))
+	assert.Equal(t, []driver.Value{"d", "e", "f"}, dest)
+}
+
+// An unrecognized column type must not abort the whole result set: it decodes
+// as its raw string while its neighbours decode normally.
+func TestRows_UnknownColumnTypeFallsBackToString(t *testing.T) {
+	testConf := NewNoOpsConfig()
+	m := newMockAthenaClient()
+	cols := []athenatypes.ColumnInfo{
+		newColumnInfo("n", "integer"),
+		newColumnInfo("g", "some_future_type"),
+		newColumnInfo("s", "varchar"),
+	}
+	m.queryToResultsGenMap["unknown_col_type"] = singlePage(buildPage(cols,
+		[]athenatypes.Row{genRow([]*string{
+			aws.String("7"), aws.String("POINT (1 2)"), aws.String("ok"),
+		})}, -1))
+
+	r, e := NewRows(context.Background(), m, "unknown_col_type", testConf,
+		NewObservability(testConf, nil, nil))
+	assert.Nil(t, e)
+	dest := make([]driver.Value, 3)
+	assert.Nil(t, r.Next(dest))
+	assert.Equal(t, []driver.Value{int32(7), "POINT (1 2)", "ok"}, dest)
+}
+
+// Athena can return row data with no ColumnInfo at all (MSCK REPAIR TABLE).
+// Column names must be synthesized rather than the page being left unusable.
+func TestRows_NilColumnInfoSynthesizesColumnNames(t *testing.T) {
+	testConf := NewNoOpsConfig()
+	m := newMockAthenaClient()
+	m.queryToResultsGenMap["nil_columninfo"] = singlePage(buildPage(nil,
+		[]athenatypes.Row{genRow([]*string{aws.String("x"), aws.String("y")})}, -1))
+
+	r, e := NewRows(context.Background(), m, "nil_columninfo", testConf,
+		NewObservability(testConf, nil, nil))
+	assert.Nil(t, e)
+	assert.Equal(t, []string{"_col0", "_col1"}, r.Columns())
+	dest := make([]driver.Value, 2)
+	assert.Nil(t, r.Next(dest))
+	assert.Equal(t, []driver.Value{"x", "y"}, dest)
+}
+
+// Athena can echo back an unchanged NextToken on an empty page. The paginator
+// is constructed with StopOnDuplicateToken so fetchNextPage terminates instead
+// of calling GetQueryResults forever.
+func TestRows_DuplicateNextTokenTerminates(t *testing.T) {
+	testConf := NewNoOpsConfig()
+	m := newMockAthenaClient()
+	m.queryToResultsGenMap["dup_token"] = func(string) (*athena.GetQueryResultsOutput, error) {
+		page := buildPage([]athenatypes.ColumnInfo{newColumnInfo("c1", "string")}, nil, -1)
+		page.NextToken = aws.String("same-token-forever")
+		return page, nil
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		r, e := NewRows(context.Background(), m, "dup_token", testConf,
+			NewObservability(testConf, nil, nil))
+		assert.Nil(t, e)
+		assert.Equal(t, io.EOF, r.Next(make([]driver.Value, 1)))
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("fetchNextPage did not terminate on a repeated NextToken")
+	}
+	assert.LessOrEqual(t, m.callCount("GetQueryResults"), 3)
 }

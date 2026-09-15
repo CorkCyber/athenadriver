@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 	"github.com/stretchr/testify/assert"
@@ -193,4 +194,83 @@ func TestAwaitQueryCompletion_CancelDuringBackoffWait(t *testing.T) {
 	assert.Equal(t, 1, nm.callCount("GetQueryExecution"), "cancel must land in the backoff wait")
 	assert.Equal(t, []string{"CANCEL_IN_WAIT_QID"}, nm.stopQIDs,
 		"the abandoned server-side query must be stopped exactly once")
+}
+
+// TestAwaitQueryCompletion_AthenaCancelledIsNotCtxCanceled: a query Athena
+// cancelled server-side (workgroup byte cutoff, admin stop, service abort)
+// must NOT masquerade as context.Canceled — callers key retry/alert decisions
+// off that sentinel — and must carry Athena's StateChangeReason.
+func TestAwaitQueryCompletion_AthenaCancelledIsNotCtxCanceled(t *testing.T) {
+	t.Parallel()
+	const reason = "Query exhausted resources at this scale factor"
+	c, _ := newPollTestConn(func(_ *Config, nm *mockAthenaClient) {
+		nm.getQEFn = func(int) (*athena.GetQueryExecutionOutput, error) {
+			out := qe("ATHENA_CANCELLED_QID", athenatypes.QueryExecutionStateCancelled)
+			out.QueryExecution.Status.StateChangeReason = aws.String(reason)
+			return out, nil
+		}
+	})
+
+	now := time.Now()
+	_, err := c.awaitQueryCompletion(context.Background(), "ATHENA_CANCELLED_QID", "wg", "SELECT 1", now, now)
+	assert.ErrorIs(t, err, ErrQueryCancelledByAthena)
+	assert.NotErrorIs(t, err, context.Canceled, "server-side cancel must not look like caller cancellation")
+	assert.ErrorContains(t, err, reason)
+}
+
+// Same path with no StateChangeReason reported: still the Athena sentinel,
+// never context.Canceled.
+func TestAwaitQueryCompletion_AthenaCancelledNoReason(t *testing.T) {
+	t.Parallel()
+	c, _ := newPollTestConn(func(_ *Config, nm *mockAthenaClient) {
+		nm.getQEFn = func(int) (*athena.GetQueryExecutionOutput, error) {
+			return qe("ATHENA_CANCELLED_QID", athenatypes.QueryExecutionStateCancelled), nil
+		}
+	})
+	now := time.Now()
+	_, err := c.awaitQueryCompletion(context.Background(), "ATHENA_CANCELLED_QID", "wg", "SELECT 1", now, now)
+	assert.ErrorIs(t, err, ErrQueryCancelledByAthena)
+	assert.NotErrorIs(t, err, context.Canceled)
+	assert.ErrorContains(t, err, "no reason reported")
+}
+
+// TestAwaitQueryCompletion_CancelRacesTimerFire: ctx cancellation landing at
+// (as near as a test can get to) the instant the poll timer fires must not
+// hang. The old code drained timer.C in the ctx.Done() branch, which blocks
+// forever under go1.23+ semantics when Stop() already consumed the value.
+// Each iteration is bounded well under the deadline, so a hang fails loudly.
+func TestAwaitQueryCompletion_CancelRacesTimerFire(t *testing.T) {
+	t.Parallel()
+	const pollInterval = 20 * time.Millisecond
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			ctx, cancel := context.WithCancel(context.Background())
+			c, _ := newPollTestConn(func(cfg *Config, nm *mockAthenaClient) {
+				cfg.ResultPollInterval = pollInterval
+				nm.getQEFn = func(n int) (*athena.GetQueryExecutionOutput, error) {
+					if n == 1 {
+						// Cancel exactly as the poll timer is due to fire.
+						time.AfterFunc(pollInterval, cancel)
+					}
+					return qe("RACE_QID", athenatypes.QueryExecutionStateQueued), nil
+				}
+			})
+			now := time.Now()
+			_, err := c.awaitQueryCompletion(ctx, "RACE_QID", "wg", "SELECT 1", now, now)
+			cancel()
+			if err == nil {
+				t.Errorf("iteration %d: expected an error", i)
+				return
+			}
+		}
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(60 * time.Second):
+		t.Fatal("poll loop hung on the ctx.Done()/timer race")
+	}
 }

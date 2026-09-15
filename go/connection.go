@@ -240,6 +240,14 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 		}
 		return nil, err
 	}
+	// QueryExecutionId is *string because it can be absent: a 200 with an
+	// unexpectedly empty body (proxy, LocalStack, a custom AthenaClient).
+	// Dereferencing it unguarded turns that into a panic inside the caller's
+	// query path.
+	if resp == nil || resp.QueryExecutionId == nil {
+		obs.Scope().Counter(DriverName + ".failure.querycontext.startqueryexecution.noqid").Inc(1)
+		return nil, errors.New("StartQueryExecution returned no query execution ID")
+	}
 
 	timeStartQueryExecution := time.Since(startOfStartQueryExecution)
 	now = time.Now()
@@ -306,6 +314,15 @@ func (c *Connection) resolveWorkgroup(ctx context.Context) (Workgroup, error) {
 	if c.connector.wgVerified.Load() {
 		return wg, nil
 	}
+	// Single-flight the verification, mirroring sharedClient's
+	// double-checked lock: without it a cold-start burst fires one
+	// GetWorkGroup (and CreateWorkGroup) per pooled connection and trips
+	// Athena's API throttle, surfacing as failed user queries.
+	c.connector.wgMu.Lock()
+	defer c.connector.wgMu.Unlock()
+	if c.connector.wgVerified.Load() {
+		return wg, nil
+	}
 	athenaWG, err := getWG(ctx, c.athenaClient, wg.Name)
 	if err != nil {
 		obs.Scope().Counter(DriverName + ".failure.querycontext.getwg").Inc(1)
@@ -361,7 +378,17 @@ func isWGNotFound(err error) bool {
 func (c *Connection) Ping(ctx context.Context) error {
 	rows, err := c.QueryContext(ctx, "SELECT 1", nil)
 	if err != nil {
-		return driver.ErrBadConn // https://golang.org/pkg/database/sql/driver/#Pinger
+		// database/sql retries an ErrBadConn Ping on two more connections
+		// and discards the real error, so reserve it for a conn that is
+		// genuinely unusable — QueryContext's entry guard already returns
+		// ErrBadConn for that, and it passes through here untouched. A
+		// cancelled/expired ctx reports itself; everything else (disabled
+		// workgroup, bad credentials, syntax) is surfaced verbatim so one
+		// health check costs one Athena query.
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		return err
 	}
 	defer rows.Close()
 	return nil
@@ -376,7 +403,6 @@ func (c *Connection) Prepare(query string) (driver.Stmt, error) {
 		connection: c,
 		query:      query,
 		closed:     false,
-		numInput:   strings.Count(query, "?"),
 	}
 	return stmt, nil
 }

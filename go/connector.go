@@ -40,11 +40,15 @@ type SQLConnector struct {
 	clientMu sync.Mutex
 	client   atomic.Pointer[athena.Client]
 
-	// wgVerified records that the configured workgroup has been confirmed
-	// to exist and be enabled (or was remote-created). The workgroup is
-	// fixed at construction, so only the first query pays for GetWorkGroup.
-	// Only success is cached — a transient failure must not poison the
-	// connector for its whole lifetime.
+	// wgMu/wgVerified record that the configured workgroup has been
+	// confirmed to exist and be enabled (or was remote-created). The
+	// workgroup is fixed at construction, so only the first query pays for
+	// GetWorkGroup — wgMu single-flights the check under the same
+	// double-checked lock as clientMu/client, so a cold-start burst of N
+	// pooled connections costs one GetWorkGroup instead of N against
+	// Athena's low API quota. Only success is cached — a transient failure
+	// must not poison the connector for its whole lifetime.
+	wgMu       sync.Mutex
 	wgVerified atomic.Bool
 }
 
@@ -83,25 +87,19 @@ func (c *SQLConnector) resolveAWSConfig(ctx context.Context) (aws.Config, error)
 	if region := c.config.RegionOrEnv(); region != "" {
 		opts = append(opts, config.WithRegion(region))
 	}
+	webIdentity := false
 	switch {
 	case profile != "":
 		// Shared profile wins; LoadDefaultConfig resolves its credentials.
 	case c.config.WebIdentityRoleARN != "" && c.config.WebIdentityTokenFile != "":
-		stsClient := sts.NewFromConfig(aws.Config{Region: c.config.RegionOrEnv()})
-		provider := stscreds.NewWebIdentityRoleProvider(
-			stsClient, c.config.WebIdentityRoleARN,
-			stscreds.IdentityTokenFile(c.config.WebIdentityTokenFile),
-			func(o *stscreds.WebIdentityRoleOptions) {
-				if c.config.WebIdentityRoleSessionName != "" {
-					o.RoleSessionName = c.config.WebIdentityRoleSessionName
-				}
-			},
-		)
-		opts = append(opts, config.WithCredentialsProvider(aws.NewCredentialsCache(provider)))
-	case c.config.AccessID != "":
+		// Handled after the base config is loaded: the STS client must be
+		// built from that same config, not a bare aws.Config{Region:...}.
+		webIdentity = true
+	case c.config.AccessID != "" && c.config.AccessID != DummyAccessID:
 		// Only DSN-supplied credentials short-circuit the chain. Credentials
 		// that merely come from the environment fall through so
-		// LoadDefaultConfig resolves (and refreshes) them itself.
+		// LoadDefaultConfig resolves (and refreshes) them itself, as does the
+		// documented DummyAccessID sentinel.
 		opts = append(opts, config.WithCredentialsProvider(
 			credentials.NewStaticCredentialsProvider(
 				c.config.AccessID,
@@ -113,7 +111,21 @@ func (c *SQLConnector) resolveAWSConfig(ctx context.Context) (aws.Config, error)
 	// LoadDefaultConfig always reads ~/.aws/config and ~/.aws/credentials and
 	// resolves env vars, SSO, container creds / IRSA and IMDS — there is no
 	// v1-style AWS_SDK_LOAD_CONFIG gate in v2.
-	return config.LoadDefaultConfig(ctx, opts...)
+	base, err := config.LoadDefaultConfig(ctx, opts...)
+	if err != nil || !webIdentity {
+		return base, err
+	}
+	provider := stscreds.NewWebIdentityRoleProvider(
+		sts.NewFromConfig(base), c.config.WebIdentityRoleARN,
+		stscreds.IdentityTokenFile(c.config.WebIdentityTokenFile),
+		func(o *stscreds.WebIdentityRoleOptions) {
+			if c.config.WebIdentityRoleSessionName != "" {
+				o.RoleSessionName = c.config.WebIdentityRoleSessionName
+			}
+		},
+	)
+	base.Credentials = aws.NewCredentialsCache(provider)
+	return base, nil
 }
 
 // sharedClient resolves the aws.Config and builds the Athena client once,
@@ -174,15 +186,17 @@ func (c *SQLConnector) Driver() driver.Driver {
 //  2. Config.WebIdentityRoleARN + WebIdentityTokenFile — explicit
 //     AssumeRoleWithWebIdentity (only when AWSProfile is unset).
 //  3. DSN-supplied static access key / secret / session token (only when
-//     Config.AccessID itself is set and AWSProfile is unset —
-//     environment-only credentials are left to the SDK chain).
+//     Config.AccessID itself is set to something other than DummyAccessID
+//     and AWSProfile is unset — environment-only credentials and the
+//     DummyAccessID sentinel are left to the SDK chain).
 //  4. config.LoadDefaultConfig — the standard aws-sdk-go-v2 chain:
 //     ~/.aws/config and ~/.aws/credentials (honoring Config.AWSProfile
 //     when set), env vars, SSO, container creds / IRSA, and IMDS.
 //
-// Cases 2 and 3 supply their credentials to LoadDefaultConfig as a
-// provider, so env-driven SDK settings (endpoint URL, retry mode, FIPS,
-// CA bundle) apply identically on every path.
+// Cases 2 and 3 are layered onto the LoadDefaultConfig result (case 2's
+// STS client is itself built from it), so env-driven SDK settings
+// (endpoint URL, retry mode, FIPS, CA bundle) apply identically on every
+// path.
 func (c *SQLConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	now := time.Now()
 	// tracer is per-connection so concurrent Connect() calls do not race

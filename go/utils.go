@@ -23,16 +23,10 @@ func ColsToCSV(rows *sql.Rows) string {
 		return ""
 	}
 	columns, _ := rows.Columns()
-	var s strings.Builder
-	for i, v := range columns {
-		s.WriteString(v)
-		if i != len(columns)-1 {
-			s.WriteString(",")
-		} else {
-			s.WriteString("\n")
-		}
+	if len(columns) == 0 {
+		return ""
 	}
-	return s.String()
+	return strings.Join(columns, ",") + "\n"
 }
 
 // RowsToCSV is to convert rows of sql.Rows to CSV format. Rows are
@@ -109,10 +103,12 @@ func executionParamsSupported(query string) bool {
 	case "select", "insert", "unload", "with":
 		return true
 	case "create":
-		// Only the CTAS form takes execution parameters; a bare AS
-		// token (reserved word, so never a column/table name) ahead of
-		// the SELECT body distinguishes it from plain CREATE TABLE DDL.
-		return slices.Contains(fields[1:], "as")
+		// Only CTAS takes execution parameters. Require `create table`
+		// (CREATE VIEW ... AS SELECT is rejected by Athena) plus a bare
+		// AS token (reserved word, so never a column/table name) ahead
+		// of the SELECT body, distinguishing it from plain CREATE TABLE DDL.
+		return len(fields) > 1 && fields[1] == "table" &&
+			slices.Contains(fields[2:], "as")
 	}
 	return false
 }

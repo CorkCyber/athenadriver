@@ -15,6 +15,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/credentials/stscreds"
+	"github.com/aws/aws-sdk-go-v2/service/sts"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -179,6 +180,53 @@ func TestSQLConnector_StaticCredentials_HonorEnvSDKSettings(t *testing.T) {
 	creds, err := awsCfg.Credentials.Retrieve(context.Background())
 	assert.Nil(t, err)
 	assert.Equal(t, "dsn-id", creds.AccessKeyID)
+}
+
+// DummyAccessID/DummySecretAccessKey are documented sentinels meaning "no
+// DSN credentials": they must be a no-op that lets the default chain
+// (env/IMDS/IRSA/SSO/profile) resolve, not a static provider that disables it.
+func TestSQLConnector_DummyCredentials_UseDefaultChain(t *testing.T) {
+	t.Setenv("AWS_ACCESS_KEY_ID", "env-id")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "env-secret")
+
+	testConf := NewNoOpsConfig()
+	_ = testConf.SetRegion("ap-southeast-1")
+	_ = testConf.SetAccessID(DummyAccessID)
+	_ = testConf.SetSecretAccessKey(DummySecretAccessKey)
+	connector := &SQLConnector{config: testConf}
+
+	awsCfg, err := connector.resolveAWSConfig(context.Background())
+	assert.Nil(t, err)
+	creds, err := awsCfg.Credentials.Retrieve(context.Background())
+	assert.Nil(t, err)
+	assert.Equal(t, "env-id", creds.AccessKeyID,
+		"the dummy sentinel must not shadow the default credential chain")
+	assert.NotEqual(t, credentials.StaticCredentialsName, creds.Source)
+}
+
+// The web-identity branch must build its STS client from the
+// LoadDefaultConfig result, not a bare aws.Config{Region:...}, or every
+// env-driven SDK setting is dropped for the AssumeRoleWithWebIdentity call.
+func TestSQLConnector_WebIdentity_HonorEnvSDKSettings(t *testing.T) {
+	noDSNCredentials(t)
+	t.Setenv("AWS_MAX_ATTEMPTS", "7")
+
+	cfg := NewNoOpsConfig()
+	_ = cfg.SetRegion("ap-southeast-1")
+	cfg.WebIdentityRoleARN = "arn:aws:iam::123456789012:role/athena-reader"
+	cfg.WebIdentityTokenFile = writeTokenFile(t)
+
+	awsCfg, err := NewConnector(cfg).resolveAWSConfig(context.Background())
+	assert.Nil(t, err)
+	// The returned config IS the one the STS client was built from, so a
+	// non-zero RetryMaxAttempts proves the branch no longer hand-rolls
+	// aws.Config{Region:...} (which would leave this at 0).
+	assert.Equal(t, 7, awsCfg.RetryMaxAttempts)
+	assert.Equal(t, 7, sts.NewFromConfig(awsCfg).Options().RetryMaxAttempts)
+
+	cache, ok := awsCfg.Credentials.(*aws.CredentialsCache)
+	assert.True(t, ok)
+	assert.True(t, cache.IsCredentialsProvider(&stscreds.WebIdentityRoleProvider{}))
 }
 
 func TestSQLConnector_Driver(t *testing.T) {

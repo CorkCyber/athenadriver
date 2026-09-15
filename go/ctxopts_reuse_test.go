@@ -19,12 +19,19 @@ func TestWithResultReuse_ZeroIsNoOp(t *testing.T) {
 }
 
 func TestWithResultReuse_ClampToMax(t *testing.T) {
-	ctx := WithResultReuse(context.Background(), 24*time.Hour)
+	ctx := WithResultReuse(context.Background(), 30*24*time.Hour)
 	cfg := resultReuseFromContext(ctx)
 	assert.NotNil(t, cfg)
 	assert.NotNil(t, cfg.ResultReuseByAgeConfiguration)
 	assert.True(t, cfg.ResultReuseByAgeConfiguration.Enabled)
-	assert.Equal(t, int32(60), *cfg.ResultReuseByAgeConfiguration.MaxAgeInMinutes)
+	assert.Equal(t, int32(10080), *cfg.ResultReuseByAgeConfiguration.MaxAgeInMinutes)
+}
+
+// 5 days is under Athena's 7-day maximum and must survive untouched.
+func TestWithResultReuse_FiveDaysNotClamped(t *testing.T) {
+	ctx := WithResultReuse(context.Background(), 5*24*time.Hour)
+	cfg := resultReuseFromContext(ctx)
+	assert.Equal(t, int32(5*24*60), *cfg.ResultReuseByAgeConfiguration.MaxAgeInMinutes)
 }
 
 func TestWithResultReuse_ClampToMin(t *testing.T) {

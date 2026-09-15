@@ -316,7 +316,7 @@ func TestConnection_InterpolateParams_Bool(t *testing.T) {
 		assert.Error(t, err, "want error for non-finite float %v", f)
 	}
 	q, err = c.interpolateParams("?", []driver.Value{time.Time{}})
-	assert.Equal(t, "'0000-00-00'", q)
+	assert.Equal(t, "NULL", q)
 	assert.Nil(t, err)
 	q, err = c.interpolateParams("?", []driver.Value{time.Now()})
 	assert.NotEqual(t, q, "'0000-00-00'")
@@ -435,7 +435,7 @@ func TestBuildExecutionParams(t *testing.T) {
 			name:        "Zero-value time",
 			inputArgs:   []driver.Value{time.Time{}},
 			expectedErr: nil,
-			expected:    []string{"'0000-00-00'"}, // Special-cased. Matches interpolateParams behavior.
+			expected:    []string{"NULL"}, // Zero time has no Trino equivalent. Matches interpolateParams behavior.
 		},
 		{
 			// Like interpolateParams(), buildExecutionParams() adds an additional 500 nanoseconds.
@@ -574,7 +574,9 @@ func TestConnection_QueryContext_WorkgroupVariants(t *testing.T) {
 	cases := []struct {
 		name   string
 		mutate func(*Config, *mockAthenaClient)
-		ping   error // expected db.Ping result; nil to skip the Ping check
+		// ping is a substring of the expected Ping error; "" skips the
+		// check. Ping surfaces the real failure rather than ErrBadConn.
+		ping string
 	}{
 		{name: "WG remote create attempted"},
 		{
@@ -593,7 +595,7 @@ func TestConnection_QueryContext_WorkgroupVariants(t *testing.T) {
 			mutate: func(cfg *Config, _ *mockAthenaClient) {
 				cfg.WGRemoteCreation = false
 			},
-			ping: driver.ErrBadConn,
+			ping: "workgroup remote creation is disabled",
 		},
 	}
 	for _, tc := range cases {
@@ -604,8 +606,10 @@ func TestConnection_QueryContext_WorkgroupVariants(t *testing.T) {
 				mut = append(mut, tc.mutate)
 			}
 			c := newTestConnWithWG(mut...)
-			if tc.ping != nil {
-				assert.Equal(t, tc.ping, c.Ping(context.Background()))
+			if tc.ping != "" {
+				err := c.Ping(context.Background())
+				assert.ErrorContains(t, err, tc.ping)
+				assert.NotErrorIs(t, err, driver.ErrBadConn)
 			}
 			driverRows, err := c.QueryContext(context.Background(), "StartQueryExecution_nil_error",
 				[]driver.NamedValue{})
@@ -988,10 +992,10 @@ func TestResolveWorkgroup_ConcurrentHammer(t *testing.T) {
 
 	hammer()
 	assert.True(t, c.connector.wgVerified.Load())
-	// Cold start is not single-flighted, so CreateWorkGroup may run up to
-	// once per racing caller; what must hold is that it never exceeds that
-	// and that every caller still succeeds.
-	assert.LessOrEqual(t, nm.callCount("CreateWorkGroup"), n)
+	// Cold start is single-flighted under wgMu: one GetWorkGroup and one
+	// CreateWorkGroup total, no matter how many callers race.
+	assert.Equal(t, 1, nm.callCount("GetWorkGroup"))
+	assert.Equal(t, 1, nm.callCount("CreateWorkGroup"))
 
 	nm.resetCalls()
 	hammer()
@@ -1070,10 +1074,10 @@ func TestQueryContext_StartQueryExecutionInput(t *testing.T) {
 			},
 		},
 		{
-			name: "result reuse is clamped to 60 minutes",
-			ctx:  func(ctx context.Context) context.Context { return WithResultReuse(ctx, 24*time.Hour) },
+			name: "result reuse is clamped to Athena's 7-day maximum",
+			ctx:  func(ctx context.Context) context.Context { return WithResultReuse(ctx, 30*24*time.Hour) },
 			check: func(t *testing.T, in *athena.StartQueryExecutionInput) {
-				assert.Equal(t, int32(60),
+				assert.Equal(t, int32(10080),
 					aws.ToInt32(in.ResultReuseConfiguration.ResultReuseByAgeConfiguration.MaxAgeInMinutes))
 			},
 		},
@@ -1219,4 +1223,120 @@ func TestDSN_MaskedColumnIsCaseInsensitive(t *testing.T) {
 	v, ok := cfg.CheckColumnMasked("ssn")
 	assert.True(t, ok)
 	assert.Equal(t, "xxx", v)
+}
+
+// TestQueryContext_NilQueryExecutionID covers a StartQueryExecution that
+// returns 200 with no QueryExecutionId (proxy / LocalStack / a custom
+// AthenaClient): the driver must report an error, never panic on the
+// dereference.
+func TestQueryContext_NilQueryExecutionID(t *testing.T) {
+	t.Parallel()
+	newConn := func() *Connection {
+		return newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+			cfg.WorkGroup = nil // skip remote workgroup resolution
+		})
+	}
+
+	// nil response: the mock answers (nil, nil) for any unmapped query.
+	c := newConn()
+	rows, err := c.QueryContext(context.Background(), "select nil_qid_probe", nil)
+	assert.Nil(t, rows)
+	assert.ErrorContains(t, err, "no query execution ID")
+
+	// non-nil response, nil QueryExecutionId.
+	c = newConn()
+	c.athenaClient = nilQIDClient{c.athenaClient.(*mockAthenaClient)}
+	rows, err = c.QueryContext(context.Background(), "select 1", nil)
+	assert.Nil(t, rows)
+	assert.ErrorContains(t, err, "no query execution ID")
+}
+
+// nilQIDClient answers StartQueryExecution with a 200-shaped response whose
+// QueryExecutionId is absent.
+type nilQIDClient struct{ *mockAthenaClient }
+
+func (nilQIDClient) StartQueryExecution(context.Context, *athena.StartQueryExecutionInput, ...func(*athena.Options)) (*athena.StartQueryExecutionOutput, error) {
+	return &athena.StartQueryExecutionOutput{}, nil
+}
+
+// TestResolveWorkgroup_ConcurrentQueryContext is the pooled-connection
+// version of the hammer: N distinct Connections sharing one SQLConnector
+// all issue their first query at once. The workgroup check must be
+// single-flighted across the whole pool — one GetWorkGroup, one
+// CreateWorkGroup — or an Athena API throttle surfaces as failed queries.
+func TestResolveWorkgroup_ConcurrentQueryContext(t *testing.T) {
+	t.Parallel()
+	const n = 32
+	seed := newTestConnWithWG(func(_ *Config, nm *mockAthenaClient) {
+		nm.CreateWGStatus = true // GetWGStatus stays false => always a miss
+		// Fail at StartQueryExecution: the workgroup check has already run
+		// by then, and stopping there keeps the goroutines off the shared
+		// (test-only, non-concurrent) result-page fixtures.
+		nm.setErr("StartQueryExecution", ErrTestMockGeneric)
+	})
+	nm := seed.athenaClient.(*mockAthenaClient)
+
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// A fresh Connection per goroutine, same connector and client —
+			// exactly what a database/sql pool cold start looks like.
+			c := &Connection{
+				athenaClient: nm,
+				connector:    seed.connector,
+				tracer:       NewObservability(NewNoOpsConfig(), nil, nil),
+			}
+			_, err := c.QueryContext(context.Background(), "SELECTQueryContext_OK", nil)
+			assert.ErrorIs(t, err, ErrTestMockGeneric,
+				"every caller must get past workgroup resolution")
+		}()
+	}
+	wg.Wait()
+
+	assert.True(t, seed.connector.wgVerified.Load())
+	assert.Equal(t, 1, nm.callCount("GetWorkGroup"))
+	assert.Equal(t, 1, nm.callCount("CreateWorkGroup"))
+	assert.Equal(t, n, nm.callCount("StartQueryExecution"))
+}
+
+// TestPing_ContextErrors pins the Pinger contract: database/sql retries an
+// ErrBadConn Ping on two more connections and throws the real error away,
+// so a cancelled or expired context must come back as itself.
+func TestPing_ContextErrors(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		want error
+	}{
+		{"cancelled", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			return ctx, func() {}
+		}, context.Canceled},
+		{"deadline exceeded", func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+			return ctx, cancel
+		}, context.DeadlineExceeded},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+				cfg.WorkGroup = nil
+			})
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			err := c.Ping(ctx)
+			assert.ErrorIs(t, err, tc.want)
+			assert.NotErrorIs(t, err, driver.ErrBadConn)
+		})
+	}
+
+	// A conn that really is unusable still reports ErrBadConn.
+	closed := newTestConnWithWG()
+	assert.NoError(t, closed.Close())
+	assert.ErrorIs(t, closed.Ping(context.Background()), driver.ErrBadConn)
 }

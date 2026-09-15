@@ -60,7 +60,8 @@ const (
 	ExpectedBucketOwnerKey = TContextKey("ExpectedBucketOwnerKey")
 
 	// ResultReuseMaxAgeKey opts a single query into Athena's result-reuse
-	// cache (engine v3). Value must be a time.Duration in (0, 60min].
+	// cache (engine v3). Value must be a time.Duration in (0, 10080min]
+	// (7 days, Athena's documented maximum; values above are clamped).
 	// Athena will reuse a previous successful result for the same query
 	// text if it is no older than this duration, saving the scan cost.
 	// Use WithResultReuse for a typed helper.

@@ -36,6 +36,25 @@ func TestStatement_NumInput(t *testing.T) {
 	assert.Equal(t, -1, st.NumInput())
 }
 
+// A prepared statement whose only `?` is inside a string literal takes zero
+// args: NumInput() must stay -1 so database/sql doesn't demand one arg.
+func TestStatement_LiteralQuestionMark_ZeroArgs(t *testing.T) {
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		cfg.WorkGroup = nil
+	})
+	q := "select ? , 'what?'" // the second `?` is inside a string literal
+	stmt, err := c.Prepare(q)
+	assert.Nil(t, err)
+	st := stmt.(*Statement)
+	assert.Equal(t, -1, st.NumInput())
+
+	_, err = st.QueryContext(context.Background(), nil)
+	assert.Nil(t, err)
+	nm := c.athenaClient.(*mockAthenaClient)
+	assert.Equal(t, q, *nm.lastStartInput.QueryString)
+	assert.Nil(t, nm.lastStartInput.ExecutionParameters)
+}
+
 func TestStatement_Exec(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{

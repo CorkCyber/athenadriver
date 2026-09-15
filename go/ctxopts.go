@@ -61,7 +61,8 @@ func resultEncryptionFromContext(ctx context.Context) *athenatypes.EncryptionCon
 // WithResultReuse opts a single query into Athena's result-reuse cache for
 // up to maxAge. Pass the returned context to db.QueryContext /
 // db.ExecContext. maxAge is clamped to the Athena-supported range
-// [1 minute, 60 minutes]; passing 0 or a negative value is a no-op.
+// [1 minute, 10080 minutes (7 days)]; passing 0 or a negative value is a
+// no-op.
 func WithResultReuse(ctx context.Context, maxAge time.Duration) context.Context {
 	if maxAge <= 0 {
 		return ctx
@@ -78,8 +79,10 @@ func resultReuseFromContext(ctx context.Context) *athenatypes.ResultReuseConfigu
 		return nil
 	}
 	minutes := max(int32(v/time.Minute), 1)
-	if minutes > 60 {
-		minutes = 60
+	// 10080 (7 days) is Athena's documented maximum for
+	// ResultReuseByAgeConfiguration.MaxAgeInMinutes; 60 is merely its default.
+	if minutes > 10080 {
+		minutes = 10080
 	}
 	return &athenatypes.ResultReuseConfiguration{
 		ResultReuseByAgeConfiguration: &athenatypes.ResultReuseByAgeConfiguration{

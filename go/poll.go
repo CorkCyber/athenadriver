@@ -4,6 +4,7 @@ package athenadriver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -12,6 +13,12 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 )
+
+// ErrQueryCancelledByAthena is returned when Athena reports the query in the
+// CANCELLED state — distinct from context.Canceled, which means the caller's
+// own context was cancelled. The wrapped message carries Athena's
+// StateChangeReason.
+var ErrQueryCancelledByAthena = errors.New("query cancelled by Athena")
 
 // awaitQueryCompletion polls GetQueryExecution until the query reaches a
 // terminal state (Succeeded / Failed / Cancelled), the caller's context is
@@ -27,15 +34,12 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 	multiplier := c.connector.config.PollBackoffMultiplier()
 	// One timer reused across poll iterations. Avoids the per-iteration
 	// allocation + leak of `time.After`, which keeps a timer alive until
-	// it fires even if the select picked ctx.Done() instead.
-	// Start it stopped/drained: the first GetQueryExecution can outlast
-	// pollInterval, and under go1.22 timer semantics the stale fired value
-	// survives the later Reset and would skip the first backoff wait.
+	// it fires even if the select picked ctx.Done() instead. Since go1.23
+	// Stop/Reset are synchronized with the timer firing, so no stale value
+	// can survive a Reset and no draining is needed (draining would in fact
+	// deadlock when Stop() already consumed the value).
 	timer := time.NewTimer(pollInterval)
 	defer timer.Stop()
-	if !timer.Stop() {
-		<-timer.C
-	}
 	for {
 		// Short-circuit if the caller has already cancelled before we issue
 		// the next GetQueryExecution. Avoids a wasted round-trip and lets us
@@ -80,7 +84,17 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 			if c.connector.config.MoneyWise {
 				printCost(c.connector.config.RegionOrEnv(), statusResp)
 			}
-			return statusResp.QueryExecution, context.Canceled
+			// NOT context.Canceled: Athena cancels queries server-side for
+			// reasons unrelated to the caller's context (workgroup
+			// BytesScannedCutoffPerQuery, an admin StopQueryExecution, a
+			// service abort). Returning the context sentinel would make
+			// `errors.Is(err, context.Canceled)` a false positive for
+			// callers whose retry logic reads that as "the caller gave up".
+			reason := aws.ToString(statusResp.QueryExecution.Status.StateChangeReason)
+			if reason == "" {
+				reason = "no reason reported"
+			}
+			return statusResp.QueryExecution, fmt.Errorf("%w: %s", ErrQueryCancelledByAthena, reason)
 		case athenatypes.QueryExecutionStateFailed:
 			qErr := &QueryFailureError{
 				Message: aws.ToString(statusResp.QueryExecution.Status.StateChangeReason),
@@ -114,9 +128,6 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 		timer.Reset(pollInterval)
 		select {
 		case <-ctx.Done():
-			if !timer.Stop() {
-				<-timer.C
-			}
 			c.stopQueryOnCancel(ctx, queryID, wgName, query, obs, loopStart)
 			return nil, ctx.Err()
 		case <-timer.C:

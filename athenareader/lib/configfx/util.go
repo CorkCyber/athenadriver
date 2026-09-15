@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // defaultConfig is the athenareader.config shipped in this repository. It is
@@ -15,7 +16,6 @@ import (
 var defaultConfig []byte
 
 func setUpFlagUsage() {
-	var commandLine = flag.NewFlagSet(os.Args[0], flag.ExitOnError)
 	flag.Usage = func() {
 		preBody := "NAME\n\tathenareader - read athena data from command line\n\n"
 		desc := "\nEXAMPLES\n\n" +
@@ -39,11 +39,11 @@ func setUpFlagUsage() {
 			"\t\n" +
 			"AUTHORS\n\tCreated by Henry Fuheng Wu at Uber Technologies. Maintained by Cork Cyber.\n\n" +
 			"REPORTING BUGS\n\thttps://github.com/CorkCyber/athenadriver/issues\n"
-		fmt.Fprint(commandLine.Output(), preBody)
-		fmt.Fprintf(commandLine.Output(),
+		fmt.Fprint(flag.CommandLine.Output(), preBody)
+		fmt.Fprintf(flag.CommandLine.Output(),
 			"SYNOPSIS\n\n\t%s [-v] [-b OUTPUT_BUCKET] [-d DATABASE_NAME] [-q QUERY_STRING_OR_FILE] [-r] [-a] [-m] [-y STYLE_NAME] [-o OUTPUT_FORMAT]\n\nDESCRIPTION\n\n", os.Args[0])
 		flag.PrintDefaults()
-		fmt.Fprint(commandLine.Output(), desc)
+		fmt.Fprint(flag.CommandLine.Output(), desc)
 	}
 }
 
@@ -51,7 +51,11 @@ func setUpFlagUsage() {
 // looking in $HOME then the working directory. If neither exists, the
 // embedded default is written to $HOME and used. No network access.
 func resolveConfigFile() (string, error) {
-	home := homeDir() + "/athenareader.config"
+	h, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	home := filepath.Join(h, "athenareader.config")
 	for _, p := range []string{home, "athenareader.config"} {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
@@ -61,13 +65,6 @@ func resolveConfigFile() (string, error) {
 		return "", fmt.Errorf("no athenareader.config found and could not write default to %s: %w", home, err)
 	}
 	return home, nil
-}
-
-func homeDir() string {
-	if h := os.Getenv("HOME"); h != "" {
-		return h
-	}
-	return os.Getenv("USERPROFILE") // windows
 }
 
 func isFlagPassed(name string) bool {

@@ -52,11 +52,18 @@ func queryAthena(qad queryfx.QueryAndDBConnection, mc configfx.AthenaDriverConfi
 			continue
 		}
 		if mc.OutputConfig.Rowonly {
-			output.PrettyPrintSQLRows(rows, mc.OutputConfig.Style, mc.OutputConfig.Render, mc.OutputConfig.Page)
+			err = output.PrettyPrintSQLRows(rows, mc.OutputConfig.Style, mc.OutputConfig.Render, mc.OutputConfig.Page)
 		} else {
-			output.PrettyPrintSQLColsRows(rows, mc.OutputConfig.Style, mc.OutputConfig.Render, mc.OutputConfig.Page)
+			err = output.PrettyPrintSQLColsRows(rows, mc.OutputConfig.Style, mc.OutputConfig.Render, mc.OutputConfig.Page)
 		}
 		rows.Close()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "ERROR: "+err.Error())
+			failed = err
+			if mc.OutputConfig.Fastfail {
+				return failed
+			}
+		}
 	}
 	return failed
 }

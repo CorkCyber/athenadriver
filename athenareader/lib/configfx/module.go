@@ -3,10 +3,11 @@
 package configfx
 
 import (
+	"errors"
 	"flag"
 	"fmt"
+	"io/fs"
 	"os"
-	"os/user"
 	"path/filepath"
 	"strings"
 
@@ -114,11 +115,16 @@ func New() (AthenaDriverConfig, error) {
 	}
 
 	filePath := expand(*query)
-	if _, err := os.Stat(filePath); err == nil {
+	if _, statErr := os.Stat(filePath); statErr == nil {
 		b, err := os.ReadFile(filePath)
-		if err == nil {
-			mc.QueryString = strings.Split(string(b), "\n\n") // convert content to a '[]string'
+		if err != nil {
+			return mc, err
 		}
+		mc.QueryString = strings.Split(string(b), "\n\n") // convert content to a '[]string'
+	} else if !errors.Is(statErr, fs.ErrNotExist) {
+		// Stat failed for a reason other than "not there" (e.g. permissions):
+		// don't silently reinterpret a file path as literal SQL.
+		return mc, statErr
 	} else {
 		mc.QueryString = append(mc.QueryString, *query)
 	}
@@ -137,8 +143,6 @@ func New() (AthenaDriverConfig, error) {
 	}
 	if isFlagPassed("f") {
 		mc.OutputConfig.Fastfail = *fastFail
-	} else {
-		mc.OutputConfig.Fastfail = true
 	}
 	if isFlagPassed("a") {
 		mc.InputConfig.Admin = *admin
@@ -176,9 +180,9 @@ func expand(path string) string {
 		return path
 	}
 
-	usr, err := user.Current()
+	home, err := os.UserHomeDir()
 	if err != nil {
-		return "/tmp/"
+		return path // better an unexpanded path than a silently wrong one
 	}
-	return filepath.Join(usr.HomeDir, path[1:])
+	return filepath.Join(home, path[1:])
 }

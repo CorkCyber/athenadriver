@@ -58,13 +58,18 @@ func renderTable(renderType string, w table.Writer) string {
 
 // prettyPrint streams sql.Rows into a table writer. When withHeader is
 // true, a header row built from rows.Columns() is emitted first.
-func prettyPrint(rows *sql.Rows, style, render string, page int, withHeader bool) {
+// It returns any error that ended the row stream early, so a truncated
+// result set is never mistaken for a complete one.
+func prettyPrint(rows *sql.Rows, style, render string, page int, withHeader bool) error {
 	if rows == nil {
-		return
+		return nil
 	}
 	t := table.NewWriter()
 	t.SetOutputMirror(os.Stdout)
-	columns, _ := rows.Columns()
+	columns, err := rows.Columns()
+	if err != nil {
+		return err
+	}
 	if withHeader && len(columns) > 0 {
 		header := make(table.Row, len(columns))
 		for i, c := range columns {
@@ -78,26 +83,32 @@ func prettyPrint(rows *sql.Rows, style, render string, page int, withHeader bool
 		for i := range rawResult {
 			scanTargets[i] = &rawResult[i]
 		}
-		_ = rows.Scan(scanTargets...) // malformed rows are skipped
+		if err := rows.Scan(scanTargets...); err != nil {
+			return err
+		}
 		row := make(table.Row, len(columns))
 		for i, cell := range rawResult {
 			row[i] = string(cell)
 		}
 		t.AppendRow(row)
 	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
 	t.SetPageSize(page)
 	t.SetStyle(getTableStyle(style))
 	renderTable(render, t)
+	return nil
 }
 
 // PrettyPrintSQLRows prints rows in the given style and render format,
 // without a header.
-func PrettyPrintSQLRows(rows *sql.Rows, style string, render string, page int) {
-	prettyPrint(rows, style, render, page, false)
+func PrettyPrintSQLRows(rows *sql.Rows, style string, render string, page int) error {
+	return prettyPrint(rows, style, render, page, false)
 }
 
 // PrettyPrintSQLColsRows prints rows in the given style and render format,
 // with a header row built from rows.Columns().
-func PrettyPrintSQLColsRows(rows *sql.Rows, style string, render string, page int) {
-	prettyPrint(rows, style, render, page, true)
+func PrettyPrintSQLColsRows(rows *sql.Rows, style string, render string, page int) error {
+	return prettyPrint(rows, style, render, page, true)
 }

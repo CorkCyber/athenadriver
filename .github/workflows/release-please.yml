@@ -1,19 +1,25 @@
 name: release-please
 
-# Semantic releases from Conventional Commits. On every master push,
-# release-please reads commits since each module's last release tag and
-# maintains one release PR per module (driver at ".", athenareader, and
-# the three scope/* adapters — see release-please-config.json). Merging
-# a release PR tags the module (directory-prefixed, "/"-separated, e.g.
-# scope/otel/v0.2.0) and publishes a GitHub Release — which then triggers
-# release.yml for validation and, for athenareader, binary artifacts.
+# Semantic releases from Conventional Commits. On every push to the
+# default branch, release-please reads commits since each module's last
+# release tag and maintains one release PR per module (driver at ".",
+# athenareader, and the three scope/* adapters — see
+# release-please-config.json). Merging a release PR tags the module
+# (directory-prefixed, "/"-separated, e.g. scope/otel/v0.2.0) and
+# publishes a GitHub Release — which then triggers release.yml for
+# validation and, for athenareader, binary artifacts.
 #
 # Bootstrap notes (first release):
-#   * .release-please-manifest.json is seeded with the v2.0.0-era
-#     versions. Push those tags (v2.0.0, athenareader/v1.0.0,
-#     scope/*/v0.1.0) BEFORE the first master push that runs this
-#     workflow, or the missing baseline tags make release-please propose
-#     a release PR spanning the entire history.
+#   * .release-please-manifest.json is seeded at 0.0.0 for every
+#     package (no tags exist yet). release-please-config.json pins each
+#     package's first release version via "release-as" (2.0.0 for the
+#     driver, 1.0.0 for athenareader, 0.1.0 for the scope/* adapters) —
+#     do NOT pre-push tags to match those versions; that recreates the
+#     exact "manifest claims a version with no matching tag" bug this
+#     setup was fixed to avoid. Let release-please's first PR create the
+#     tags itself, then remove each package's "release-as" once its
+#     first release has shipped, or every future bump keeps pinning to
+#     that same version.
 #   * A driver major bump (3.0.0) requires a manual module-path change to
 #     /v3 first — release-please bumps numbers, not import paths. Gate it
 #     with a Release-As footer once the path migration lands.
@@ -27,7 +33,7 @@ name: release-please
 
 on:
   push:
-    branches: [master]
+    branches: [master, main]
   workflow_dispatch:
 
 permissions:

@@ -10,8 +10,8 @@
 
 ----
 
-:package: [athenadriver](https://github.com/CorkCyber/athenadriver/tree/master/go) - A fully-featured AWS Athena database driver for Go  
-:shell: [athenareader](https://github.com/CorkCyber/athenadriver/tree/master/athenareader) - A moneywise command line utililty to query athena in command line.
+:package: [athenadriver](https://github.com/CorkCyber/athenadriver/tree/main/go) - A fully-featured AWS Athena database driver for Go  
+:shell: [athenareader](https://github.com/CorkCyber/athenadriver/tree/main/athenareader) - A moneywise command line utililty to query athena in command line.
 
 ----
 
@@ -237,7 +237,7 @@ Except the basic features provided by Go `database/sql` like error handling, dat
 - Bring-your-own metrics via a 2-method `Scope` interface; ready-made adapters for OpenTelemetry, tally, and statsd [:link:](#enable-metrics)
 - OpenTelemetry-compatible tracing spans, tagged per the database semantic conventions so Sentry/Datadog/etc. recognize them as DB calls [:link:](#enable-tracing)
 
-`athenadriver` can extremely simplify your code. Check [athenareader](https://github.com/CorkCyber/athenadriver/tree/master/athenareader) out as an example and a convenient tool for your Athena query in command line. 
+`athenadriver` can extremely simplify your code. Check [athenareader](https://github.com/CorkCyber/athenadriver/tree/main/athenareader) out as an example and a convenient tool for your Athena query in command line. 
 
 ## How to set up/install/test `athenadriver`
 
@@ -329,7 +329,7 @@ Please be noted the code is for demonstration purpose only, so please follow you
 
 ### Get Started - A Simple Query
 
-The following is the simplest example for demonstration purpose. The source code is available at [examples/query/dml_select_simple/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_simple/main.go).
+The following is the simplest example for demonstration purpose. The source code is available at [examples/query/dml_select_simple/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_simple/main.go).
 
 ```go
 package main
@@ -411,7 +411,7 @@ with AWS CLI Config: 456
 ```
 
 This is also the authentication method to use in [AWS Lambda](https://aws.amazon.com/lambda/): the function's execution role is picked up automatically via IMDS/container credentials, so you only need to specify the output bucket.
-Please check the AWS Lambda Go sample code [here](https://github.com/CorkCyber/athenadriver/tree/master/examples/lambda/Go).
+Please check the AWS Lambda Go sample code [here](https://github.com/CorkCyber/athenadriver/tree/main/examples/lambda/Go).
 
 A non-default profile can be selected either via the `AWS_PROFILE` environment variable or explicitly on `Config.AWSProfile`:
 
@@ -447,7 +447,7 @@ The sample output:
 with AthenaDriver Config: 123
 ```
 
-The full code is here at [examples/auth/main.go](https://github.com/CorkCyber/athenadriver/tree/master/examples/auth/main.go).
+The full code is here at [examples/auth/main.go](https://github.com/CorkCyber/athenadriver/tree/main/examples/auth/main.go).
 
 ### Full Support of All Data Types 
 
@@ -992,7 +992,7 @@ back immediately, poll for its status separately. A `pseudo command`
 is a special prefix string you put in `db.QueryContext`,
 `db.QueryRow`, or `db.ExecContext`.
 
-It is easier to explain with an example like  [pc_get_query_id.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_get_query_id/main.go).
+It is easier to explain with an example like  [pc_get_query_id.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/pc_get_query_id/main.go).
 
 ```go
 package main
@@ -1023,7 +1023,7 @@ func main() {
 }
 ```
 
-In [pc_get_query_id/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_get_query_id/main.go), we only want the `Query ID` of the SQL statement, so we prepend `pc:get_query_id` to the SQL. So the final string we pass to `db.QueryRow` is `pc:get_query_id select url from sampledb.elb_logs limit 2`. The return value is one row with an Athena Query ID inside. A sample Output is:
+In [pc_get_query_id/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/pc_get_query_id/main.go), we only want the `Query ID` of the SQL statement, so we prepend `pc:get_query_id` to the SQL. So the final string we pass to `db.QueryRow` is `pc:get_query_id select url from sampledb.elb_logs limit 2`. The return value is one row with an Athena Query ID inside. A sample Output is:
 ```
 Query ID: c89088ab-595d-4ee6-a9ce-73b55aeb8953
 ```
@@ -1034,19 +1034,19 @@ The syntax is `pc:pseudo_command parameter`.
 
 ### get_query_id
 
-`pc:get_query_id SQL_STATEMENT` - Will return Query ID of the `SQL_STATEMENT`, no matter request fails or succeeds. Example: [pc_get_query_id.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_get_query_id/main.go).
+`pc:get_query_id SQL_STATEMENT` - Will return Query ID of the `SQL_STATEMENT`, no matter request fails or succeeds. Example: [pc_get_query_id.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/pc_get_query_id/main.go).
 
 ### get_query_id_status
 
-`pc:get_query_id_status Query_ID` - Return status of the Query ID. Example: [pc_get_query_id_status.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_get_query_id_status/main.go).
+`pc:get_query_id_status Query_ID` - Return status of the Query ID. Example: [pc_get_query_id_status.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/pc_get_query_id_status/main.go).
 
 ### stop_query_id
 
-`pc:stop_query_id Query_ID` - To stop the Query corresponding the Query ID. If there is no error, a one row string with `OK` will be returned. Example: [pc_stop_query_id.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_stop_query_id/main.go).
+`pc:stop_query_id Query_ID` - To stop the Query corresponding the Query ID. If there is no error, a one row string with `OK` will be returned. Example: [pc_stop_query_id.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/pc_stop_query_id/main.go).
 
 ### get_driver_version
 
-`pc:get_driver_version` - To return the version of athenadriver. Example: [pc_get_driver_version.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/pc_get_driver_version/main.go).
+`pc:get_driver_version` - To return the version of athenadriver. Example: [pc_get_driver_version.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/pc_get_driver_version/main.go).
 
 
 ###  Enable Driver Logging
@@ -1253,7 +1253,7 @@ DESC sampledb.elb_logs
 
 We can see there are 3 columns according to `ColumnInfo` under `ResultSetMetadata`. But in the first row `Rows[0]`, we see there is only 1 field: `"elb_name \tstring    \t    "`. I would imagine there could have been 3 items in the `Data[0]`, but somehow the code author doesn't split it with tab(`\t`), so it ends up with only 1 item. The same issue happens for `SHOW` statement.
 
-For more sample code, see [util_desc_table/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/util_desc_table/main.go), [util_desc_view/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/util_desc_view/main.go), and [util_show/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/util_show/main.go).
+For more sample code, see [util_desc_table/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/util_desc_table/main.go), [util_desc_view/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/util_desc_view/main.go), and [util_show/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/util_show/main.go).
 
 - `athenadriver`'s Solution:
 
@@ -1289,7 +1289,7 @@ Because this issue happens only in statements [`CTAS`](https://docs.aws.amazon.c
  returned from Athena, `athenadriver` sets `UpdateCount` as the value of
   the returned row.
 
-For more sample code, see [ddl_ctas/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/ddl_ctas/main.go), [ddl_cvas/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/ddl_cvas/main.go), and [dml_insert_into_select/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_insert_into_select/main.go).
+For more sample code, see [ddl_ctas/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/ddl_ctas/main.go), [ddl_cvas/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/ddl_cvas/main.go), and [dml_insert_into_select/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_insert_into_select/main.go).
 
 ### Type Loss for map, struct, array etc
 
@@ -1321,8 +1321,8 @@ For data types: `array`, `map`, `json`, `char`, `varchar`, `varbinary`, `row`, `
 
 For time and date types: `date`, `time`, `time with time zone`, `timestamp`, `timestamp with time zone`, `athenadriver` returns Go's [`time.Time`](https://golang.org/pkg/time/#Time).
 
-Sample code: [dml_select_array/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_array/main.go),
-[dml_select_map/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_map/main.go), [dml_select_time/main.go](https://github.com/CorkCyber/athenadriver/blob/master/examples/query/dml_select_time/main.go).
+Sample code: [dml_select_array/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_array/main.go),
+[dml_select_map/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_map/main.go), [dml_select_time/main.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_time/main.go).
 
 
 ## FAQ
@@ -1419,7 +1419,7 @@ pre-fork history.
 [doc-img]: https://img.shields.io/badge/GoDoc-Reference-red.svg
 [doc]: https://pkg.go.dev/mod/github.com/CorkCyber/athenadriver
 
-[cov-img]: https://codecov.io/gh/CorkCyber/athenadriver/branch/master/graph/badge.svg
+[cov-img]: https://codecov.io/gh/CorkCyber/athenadriver/branch/main/graph/badge.svg
 [cov]: https://codecov.io/gh/CorkCyber/athenadriver
 
 [release-img]: https://img.shields.io/github/v/tag/CorkCyber/athenadriver?label=release
@@ -1429,7 +1429,7 @@ pre-fork history.
 [report-card]: https://goreportcard.com/report/github.com/CorkCyber/athenadriver
 
 [license-img]: https://img.shields.io/badge/License-MIT-red
-[license]: https://github.com/CorkCyber/athenadriver/blob/master/LICENSE
+[license]: https://github.com/CorkCyber/athenadriver/blob/main/LICENSE
 
 [release-policy]: https://golang.org/doc/devel/release.html#policy
 

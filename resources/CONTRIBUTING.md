@@ -43,9 +43,9 @@ make examples       # builds every example
 ## Making changes
 
 ```bash
-git checkout master
+git checkout main
 git fetch upstream
-git rebase upstream/master
+git rebase upstream/main
 git checkout -b your_branch_name
 ```
 

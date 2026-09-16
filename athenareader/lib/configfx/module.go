@@ -12,7 +12,7 @@ import (
 	"strings"
 
 	drv "github.com/CorkCyber/athenadriver/v2/go"
-	"gopkg.in/yaml.v3"
+	"go.yaml.in/yaml/v3"
 )
 
 // ReaderOutputConfig is to represent the output section of configuration file

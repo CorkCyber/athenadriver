@@ -5,7 +5,7 @@ go 1.26
 require (
 	github.com/CorkCyber/athenadriver/v2 v2.0.0
 	github.com/jedib0t/go-pretty/v6 v6.8.3
-	gopkg.in/yaml.v3 v3.0.1
+	go.yaml.in/yaml/v3 v3.0.5
 )
 
 require (

@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/CorkCyber/athenadriver/v2 v2.0.0
-	github.com/cactus/go-statsd-client/v5 v5.0.0
+	github.com/cactus/go-statsd-client/v5 v5.1.0
 )
 
 require (

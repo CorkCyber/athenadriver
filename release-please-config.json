@@ -7,19 +7,24 @@
     ".": {
       "component": "athenadriver",
       "include-component-in-tag": false,
-      "changelog-path": "CHANGELOG.md"
+      "changelog-path": "CHANGELOG.md",
+      "release-as": "2.0.0"
     },
     "athenareader": {
-      "component": "athenareader"
+      "component": "athenareader",
+      "release-as": "1.0.0"
     },
     "scope/otel": {
-      "component": "scope/otel"
+      "component": "scope/otel",
+      "release-as": "0.1.0"
     },
     "scope/tally": {
-      "component": "scope/tally"
+      "component": "scope/tally",
+      "release-as": "0.1.0"
     },
     "scope/statsd": {
-      "component": "scope/statsd"
+      "component": "scope/statsd",
+      "release-as": "0.1.0"
     }
   }
 }

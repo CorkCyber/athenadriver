@@ -1,7 +1,6 @@
 
 ![](resources/logo.png)
 
-[![CodeCov][cov-img]][cov]
 [![GoDoc][doc-img]][doc]
 [![Github release][release-img]][release]
 [![Go Report Card][report-card-img]][report-card]
@@ -1419,8 +1418,6 @@ pre-fork history.
 [doc-img]: https://img.shields.io/badge/GoDoc-Reference-red.svg
 [doc]: https://pkg.go.dev/mod/github.com/CorkCyber/athenadriver
 
-[cov-img]: https://codecov.io/gh/CorkCyber/athenadriver/branch/main/graph/badge.svg
-[cov]: https://codecov.io/gh/CorkCyber/athenadriver
 
 [release-img]: https://img.shields.io/github/v/tag/CorkCyber/athenadriver?label=release
 [release]: https://github.com/CorkCyber/athenadriver/releases

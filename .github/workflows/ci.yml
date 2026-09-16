@@ -41,11 +41,12 @@ jobs:
         run: go build ./examples/...
       - name: go test
         run: go test -race -coverprofile=coverage.out -coverpkg=./go/... ./go/...
-      - name: upload coverage
-        uses: codecov/codecov-action@v4
-        with:
-          files: coverage.out
-          fail_ci_if_error: false
+      - name: coverage summary
+        run: |
+          echo "### Coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          go tool cover -func=coverage.out | tail -1 >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   athenareader:
     name: athenareader CLI

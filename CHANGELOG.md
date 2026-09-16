@@ -104,7 +104,7 @@ Internal only. See "Breaking" above for user-visible v1 → v2 changes.
 - Driver no longer pulls `go.uber.org/zap`, `zapcore`, or `go.uber.org/multierr`. Only remaining uber transitive: `go.uber.org/atomic` (required by `tally/v4`).
 - `(*Rows).fetchNextPage` uses `athena.NewGetQueryResultsPaginator`; hand-rolled `NextToken` loop gone.
 - Vendored `aws-sdk-go` v1 `awsutil.Prettify` replaced with a purpose-built formatter for `athena/types.WorkGroupConfiguration` and its nested types.
-- CI replaced `.travis.yml` with `.github/workflows/ci.yml`: `go vet`, `gofmt -s`, `go test -race` across Go 1.26, Codecov, athenareader CLI build.
+- CI replaced `.travis.yml` with `.github/workflows/ci.yml`: `go vet`, `gofmt -s`, `go test -race` across Go 1.26, a coverage summary in the job's Actions run, athenareader CLI build.
 - `go.mod` `go` directive relaxed from `1.26.3` (Grafana plugin default) to `1.26`.
 - `examples/metrics/main.go` rewritten against the new `Scope` interface, using the OpenTelemetry adapter (`scope/otel`) as the reference implementation; `scope/tally` and `scope/statsd` are noted as drop-in alternatives.
 - README: "About this fork" section, badges refreshed, FOSSA badge dropped.

@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/CorkCyber/athenadriver/v2 v2.0.0
-	github.com/jedib0t/go-pretty/v6 v6.2.7
+	github.com/jedib0t/go-pretty/v6 v6.8.3
 	gopkg.in/yaml.v3 v3.0.1
 )
 
@@ -24,7 +24,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/ssooidc v1.43.0 // indirect
 	github.com/aws/aws-sdk-go-v2/service/sts v1.51.0 // indirect
 	github.com/aws/smithy-go v1.28.1 // indirect
-	github.com/mattn/go-runewidth v0.0.13 // indirect
-	github.com/rivo/uniseg v0.2.0 // indirect
-	golang.org/x/sys v0.27.0 // indirect
+	github.com/mattn/go-runewidth v0.0.16 // indirect
+	github.com/rivo/uniseg v0.4.7 // indirect
+	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/text v0.22.0 // indirect
 )

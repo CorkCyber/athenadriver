@@ -4,13 +4,21 @@ package athenadriver
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	athenatypes "github.com/aws/aws-sdk-go-v2/service/athena/types"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
+)
+
+// Test-only sentinel errors returned by the mock Athena client.
+var (
+	ErrTestMockGeneric        = errors.New("some_mock_error_for_test")
+	ErrTestMockFailedByAthena = errors.New("the reason why Athena failed the query")
 )
 
 // genQueryResultsOutputByToken builds a GetQueryResultsOutput for a given
@@ -104,6 +112,7 @@ func newMockAthenaClient() *mockAthenaClient {
 				one(col("c1", "integer")),
 				[]athenatypes.Row{missingDataRow(one(col("c1", "integer")))},
 				1024)),
+			"nil_resultset": singlePage(&athena.GetQueryResultsOutput{}),
 		},
 	}
 }
@@ -142,7 +151,12 @@ func (m *mockAthenaClient) CreateWorkGroup(_ context.Context, _ *athena.CreateWo
 
 func (m *mockAthenaClient) GetWorkGroup(_ context.Context, _ *athena.GetWorkGroupInput, _ ...func(*athena.Options)) (*athena.GetWorkGroupOutput, error) {
 	if !m.GetWGStatus {
-		return nil, ErrTestMockGeneric
+		// Mirror the modeled exception Athena actually returns for an
+		// absent workgroup, so the driver's not-found detection is what
+		// is under test rather than a bare error value.
+		return nil, &athenatypes.InvalidRequestException{
+			Message: aws.String("WorkGroup is not found."),
+		}
 	}
 	state := athenatypes.WorkGroupStateEnabled
 	if m.WGDisabled {
@@ -163,6 +177,7 @@ var queryToQID = map[string]string{
 	"SELECTQueryContext_?":                   "SELECTQueryContext_OK_QID",
 	"SELECTQueryContext_CANCEL_OK":           "SELECTQueryContext_CANCEL_OK_QID",
 	"select ?":                               "PING_OK_QID",
+	"select ? , 'what?'":                     "PING_OK_QID",
 	"alter table t set location 'x'":         "PING_OK_QID",
 	"SELECTQueryContext_AWS_CANCEL":          "SELECTQueryContext_AWS_CANCEL_QID",
 	"SELECTQueryContext_AWS_FAIL":            "SELECTQueryContext_AWS_FAIL_QID",
@@ -258,12 +273,20 @@ var qidQueryExecutions = map[string]*athena.GetQueryExecutionOutput{
 		withAthenaError(2, 1001, true, "SYNTAX_ERROR: line 1:8")),
 	"SELECTQueryContext_CANCEL_FAIL_QID": qe("SELECTQueryContext_CANCEL_FAIL_QID",
 		athenatypes.QueryExecutionStateQueued),
+	// Stays Queued forever; the test that uses it sets a 1-second
+	// query timeout on the connection config so the poll loop gives up.
 	"SELECTQueryContext_TIMEOUT_QID": qe("SELECTQueryContext_TIMEOUT_QID",
-		athenatypes.QueryExecutionStateQueued,
-		withStatementType(athenatypes.StatementType("TIMEOUT_NOW"))),
+		athenatypes.QueryExecutionStateQueued),
 	"c89088ab-595d-4ee6-a9ce-73b55aeb8900": qe("SELECTQueryContext_CANCEL_OK_QID",
 		athenatypes.QueryExecutionStateQueued,
 		withStatementType(athenatypes.StatementTypeDdl), withDataScanned(123)),
+	// Non-nil output, nil Status: Athena's contract doesn't guarantee Status
+	// is always populated, and the caller must not deref it blindly.
+	"c89088ab-595d-4ee6-a9ce-73b55aeb8nil": {
+		QueryExecution: &athenatypes.QueryExecution{
+			QueryExecutionId: aws.String("c89088ab-595d-4ee6-a9ce-73b55aeb8nil"),
+		},
+	},
 }
 
 var qidErrors = map[string]error{

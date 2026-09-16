@@ -38,11 +38,6 @@ func (s *Statement) NumInput() int {
 	return s.numInput
 }
 
-// ColumnConverter is to return driver's DefaultParameterConverter.
-func (s *Statement) ColumnConverter(idx int) driver.ValueConverter {
-	return driver.DefaultParameterConverter
-}
-
 // Exec is to execute a prepared statement.
 func (s *Statement) Exec(args []driver.Value) (driver.Result, error) {
 	if s.closed {

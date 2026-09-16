@@ -5,8 +5,8 @@ package athenadriver
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"time"
-	"unicode"
 )
 
 // AthenaTime represents a time.Time value that can be null.
@@ -17,47 +17,28 @@ type AthenaTime struct {
 	Valid bool
 }
 
+// timeLayouts is ordered most-common-first: the first match wins and every
+// failed attempt allocates a *time.ParseError. No fractional-second layouts
+// are needed — time.Parse accepts a fractional suffix after the seconds
+// field even when the layout does not mention one — so these three cover
+// every Athena DATE/TIME/TIMESTAMP shape at any fraction width.
 var timeLayouts = []string{
-	"2006-01-02",
-	"15:04:05.000",
-	"2006-01-02 15:04:05.000000000",
-	"2006-01-02 15:04:05.000000",
-	"2006-01-02 15:04:05.000",
-	// Athena emits TIMESTAMPs without fractional seconds when the
-	// underlying value has none — e.g. CAST('2024-01-01 10:00:00' AS
-	// TIMESTAMP). Without this layout Scan of such rows fails.
 	"2006-01-02 15:04:05",
+	"2006-01-02",
+	"15:04:05",
 }
 
-// likelyTimeLayout picks the single layout matching the value's shape so
-// the common case parses on the first attempt instead of failing through
-// up to five layouts per cell (a real per-row cost on large scans).
-// parseAthenaTime still falls back to the full timeLayouts sweep if the
-// shape-guess fails to parse.
-func likelyTimeLayout(v string) string {
-	dot := strings.IndexByte(v, '.')
-	if strings.IndexByte(v, ' ') >= 0 {
-		if dot < 0 {
-			return "2006-01-02 15:04:05"
-		}
-		switch len(v) - dot - 1 {
-		case 9:
-			return "2006-01-02 15:04:05.000000000"
-		case 6:
-			return "2006-01-02 15:04:05.000000"
-		default:
-			return "2006-01-02 15:04:05.000"
-		}
-	}
-	if strings.IndexByte(v, ':') >= 0 {
-		return "15:04:05.000"
-	}
-	return "2006-01-02"
-}
+// locCache memoizes time.LoadLocation, which has no cache of its own and
+// re-reads tzdata from disk on every call (~42us, 6.6KB). Zone names in a
+// result set are a small fixed set, so the cache is bounded in practice.
+var locCache sync.Map // string -> *time.Location
 
 func scanTime(vv string) (AthenaTime, error) {
-	parts := strings.Split(vv, " ")
-	if len(parts) > 1 && !unicode.IsDigit(rune(parts[len(parts)-1][0])) {
+	// Peek at the byte after the last space without allocating a []string:
+	// a non-digit there means a trailing timezone name. Bounds-checked so a
+	// trailing space (or a bare " ") falls through instead of panicking.
+	if i := strings.LastIndexByte(vv, ' '); i >= 0 && i+1 < len(vv) &&
+		(vv[i+1] < '0' || vv[i+1] > '9') {
 		return parseAthenaTimeWithLocation(vv)
 	}
 	return parseAthenaTime(vv)
@@ -68,10 +49,8 @@ func parseAthenaTime(v string) (AthenaTime, error) {
 }
 
 func parseAthenaTimeIn(v string, loc *time.Location) (AthenaTime, error) {
-	t, err := time.ParseInLocation(likelyTimeLayout(v), v, loc)
-	if err == nil {
-		return AthenaTime{Valid: true, Time: t}, nil
-	}
+	var t time.Time
+	var err error
 	for _, layout := range timeLayouts {
 		t, err = time.ParseInLocation(layout, v, loc)
 		if err == nil {
@@ -87,9 +66,13 @@ func parseAthenaTimeWithLocation(v string) (AthenaTime, error) {
 		return AthenaTime{}, fmt.Errorf("cannot convert %v (%T) to time+zone", v, v)
 	}
 	stamp, location := v[:idx], v[idx+1:]
-	loc, err := time.LoadLocation(location)
-	if err != nil {
-		return AthenaTime{}, fmt.Errorf("cannot load timezone %q: %w", location, err)
+	loc, ok := locCache.Load(location)
+	if !ok {
+		l, err := time.LoadLocation(location)
+		if err != nil {
+			return AthenaTime{}, fmt.Errorf("cannot load timezone %q: %w", location, err)
+		}
+		loc, _ = locCache.LoadOrStore(location, l)
 	}
-	return parseAthenaTimeIn(stamp, loc)
+	return parseAthenaTimeIn(stamp, loc.(*time.Location))
 }

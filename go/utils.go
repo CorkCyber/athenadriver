@@ -3,7 +3,6 @@
 package athenadriver
 
 import (
-	"bytes"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/csv"
@@ -43,9 +42,9 @@ func RowsToCSV(rows *sql.Rows) string {
 		return ""
 	}
 	columns, _ := rows.Columns()
-	var buf bytes.Buffer
+	var buf strings.Builder
 	csvWriter := csv.NewWriter(&buf)
-	rawResult := make([][]byte, len(columns))
+	rawResult := make([]sql.RawBytes, len(columns))
 	row := make([]any, len(columns))
 	for i := range rawResult {
 		row[i] = &rawResult[i]
@@ -126,33 +125,23 @@ func newColumnInfo(colName string, colType any) athenatypes.ColumnInfo {
 	catalogName := "hive"
 	schemaName := ""
 	tableName := ""
-	if colType == nil {
-		return athenatypes.ColumnInfo{
-			CaseSensitive: false,
-			CatalogName:   &catalogName,
-			Label:         &colName,
-			Name:          &colName,
-			Nullable:      athenatypes.ColumnNullableUnknown,
-			Precision:     19,
-			Scale:         0,
-			SchemaName:    &schemaName,
-			TableName:     &tableName,
-			Type:          nil,
-		}
-	}
-	ct := colType.(string)
-	return athenatypes.ColumnInfo{
+	ci := athenatypes.ColumnInfo{
 		CaseSensitive: false,
 		CatalogName:   &catalogName,
 		Label:         &colName,
 		Name:          &colName,
-		Nullable:      athenatypes.ColumnNullableNullable,
+		Nullable:      athenatypes.ColumnNullableUnknown,
 		Precision:     19,
 		Scale:         0,
 		SchemaName:    &schemaName,
 		TableName:     &tableName,
-		Type:          &ct,
 	}
+	// nil colType means "type unreported" (test fixtures only).
+	if ct, ok := colType.(string); ok {
+		ci.Nullable = athenatypes.ColumnNullableNullable
+		ci.Type = &ct
+	}
+	return ci
 }
 
 func newRow(colLen int, rData []string) athenatypes.Row {
@@ -285,9 +274,6 @@ func valueToNamedValue(args []driver.Value) []driver.NamedValue {
 }
 
 func isQueryTimeOut(startOfStartQueryExecution time.Time, queryType athenatypes.StatementType, serviceLimitOverride *ServiceLimitOverride) bool {
-	if queryType == "TIMEOUT_NOW" {
-		return true
-	}
 	ddlQueryTimeout := DDLQueryTimeout
 	dmlQueryTimeout := DMLQueryTimeout
 	if serviceLimitOverride != nil {

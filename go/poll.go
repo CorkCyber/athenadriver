@@ -4,6 +4,7 @@ package athenadriver
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -27,14 +28,23 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 	// One timer reused across poll iterations. Avoids the per-iteration
 	// allocation + leak of `time.After`, which keeps a timer alive until
 	// it fires even if the select picked ctx.Done() instead.
+	// Start it stopped/drained: the first GetQueryExecution can outlast
+	// pollInterval, and under go1.22 timer semantics the stale fired value
+	// survives the later Reset and would skip the first backoff wait.
 	timer := time.NewTimer(pollInterval)
 	defer timer.Stop()
+	if !timer.Stop() {
+		<-timer.C
+	}
 	for {
 		// Short-circuit if the caller has already cancelled before we issue
 		// the next GetQueryExecution. Avoids a wasted round-trip and lets us
 		// reach the cancellation path that also issues StopQueryExecution.
+		// stopQueryOnCancel already logs + counts its own failure; we must
+		// return the bare ctx.Err() so callers doing `err == context.Canceled`
+		// (or DeadlineExceeded) keep working.
 		if err := ctx.Err(); err != nil {
-			c.stopQueryOnCancel(queryID, wgName, query, obs, loopStart)
+			c.stopQueryOnCancel(ctx, queryID, wgName, query, obs, loopStart)
 			return nil, err
 		}
 		statusResp, err := c.athenaClient.GetQueryExecution(ctx, &athena.GetQueryExecutionInput{
@@ -50,11 +60,16 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 			// cancellation, the server-side query is still running and will
 			// keep scanning bytes until it finishes. Stop it explicitly so
 			// the caller is not billed for work they cancelled.
-			if ctx.Err() != nil {
-				c.stopQueryOnCancel(queryID, wgName, query, obs, loopStart)
-				return nil, ctx.Err()
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				c.stopQueryOnCancel(ctx, queryID, wgName, query, obs, loopStart)
+				return nil, ctxErr
 			}
 			return nil, err
+		}
+		if statusResp == nil || statusResp.QueryExecution == nil ||
+			statusResp.QueryExecution.Status == nil {
+			obs.Scope().Counter(DriverName + ".failure.querycontext.getqueryexecutionwithcontext").Inc(1)
+			return nil, fmt.Errorf("GetQueryExecution returned no status for query ID %q", queryID)
 		}
 		switch statusResp.QueryExecution.Status.State {
 		case athenatypes.QueryExecutionStateCancelled:
@@ -102,9 +117,7 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 			if !timer.Stop() {
 				<-timer.C
 			}
-			if err := c.stopQueryOnCancel(queryID, wgName, query, obs, loopStart); err != nil {
-				return nil, err
-			}
+			c.stopQueryOnCancel(ctx, queryID, wgName, query, obs, loopStart)
 			return nil, ctx.Err()
 		case <-timer.C:
 			if isQueryTimeOut(queryStart, statusResp.QueryExecution.StatementType, c.connector.config.ServiceLimit) {
@@ -113,6 +126,9 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 					slog.String("queryID", queryID),
 					slog.String("query", query))
 				obs.Scope().Counter(DriverName + ".failure.querycontext.timeout").Inc(1)
+				// Abandoning the query without stopping it leaves it running
+				// and billing. Best-effort, per the doc comment.
+				c.stopQueryOnCancel(ctx, queryID, wgName, query, obs, loopStart)
 				return statusResp.QueryExecution, ErrQueryTimeout
 			}
 			if multiplier > 1 {
@@ -124,12 +140,15 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 }
 
 // stopQueryOnCancel is the cleanup path when the caller's context is
-// cancelled mid-query. It issues StopQueryExecution using a fresh
-// (non-cancelled) Background context so the server-side query is actually
-// stopped, optionally records the final cost, and updates metrics/logs.
-// Returns a non-nil error only if StopQueryExecution itself failed.
-func (c *Connection) stopQueryOnCancel(queryID, wgName, query string, obs *DriverTracer, now time.Time) error {
-	_, err := c.athenaClient.StopQueryExecution(context.Background(), &athena.StopQueryExecutionInput{
+// cancelled or the query is otherwise abandoned mid-flight. It issues
+// StopQueryExecution on a detached copy of ctx (cancellation of ctx does not
+// cancel the cleanup) bounded by a short timeout so it cannot hang for the
+// full SDK retry budget, optionally records the final cost, and updates
+// metrics/logs. Returns a non-nil error only if StopQueryExecution failed.
+func (c *Connection) stopQueryOnCancel(ctx context.Context, queryID, wgName, query string, obs *DriverTracer, now time.Time) error {
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+	defer cancel()
+	_, err := c.athenaClient.StopQueryExecution(cleanupCtx, &athena.StopQueryExecutionInput{
 		QueryExecutionId: aws.String(queryID),
 	})
 	if err != nil {
@@ -141,7 +160,7 @@ func (c *Connection) stopQueryOnCancel(queryID, wgName, query string, obs *Drive
 		return err
 	}
 	if c.connector.config.MoneyWise {
-		statusRespFinal, _ := c.athenaClient.GetQueryExecution(context.Background(), &athena.GetQueryExecutionInput{
+		statusRespFinal, _ := c.athenaClient.GetQueryExecution(cleanupCtx, &athena.GetQueryExecutionInput{
 			QueryExecutionId: aws.String(queryID),
 		})
 		printCost(c.connector.config.RegionOrEnv(), statusRespFinal)

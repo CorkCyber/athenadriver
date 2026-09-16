@@ -51,5 +51,8 @@ func (d *SQLDriver) Validate(dsn string) error {
 // and also provides access to per-Conn contexts.
 func (d *SQLDriver) OpenConnector(dsn string) (driver.Connector, error) {
 	config, err := NewConfig(dsn)
-	return &SQLConnector{config: config}, err
+	if err != nil {
+		return nil, err
+	}
+	return &SQLConnector{config: config}, nil
 }

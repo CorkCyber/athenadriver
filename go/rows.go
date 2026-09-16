@@ -46,9 +46,8 @@ type athenaTypeMeta struct {
 }
 
 // athenaTypes is the single source of truth for Athena column types the
-// driver recognizes. ColumnTypeScanType and getDefaultValueForColumnType
-// both index into this map; athenaTypeToGoType's parse switch covers the
-// same key set. Types listed here as scanTypeString are returned to
+// driver recognizes. ColumnTypeScanType and the per-column decoder cache
+// (colMetas) both index into this map. Types listed here as scanTypeString are returned to
 // database/sql as Go strings (Athena's text-shaped types and anything the
 // driver does not specially decode).
 func parseIntBits(bits int) func(string) (any, error) {
@@ -214,7 +213,7 @@ func NewRows(ctx context.Context, client AthenaClient, queryID string, driverCon
 func (r *Rows) Columns() []string {
 	var columns []string
 	for _, colInfo := range r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo {
-		columns = append(columns, *colInfo.Name)
+		columns = append(columns, aws.ToString(colInfo.Name))
 	}
 	return columns
 }
@@ -233,7 +232,7 @@ func (r *Rows) ColumnTypeDatabaseTypeName(index int) string {
 }
 
 // ColumnTypeScanType implements driver.RowsColumnTypeScanType. Returns the Go
-// type that values from athenaTypeToGoType land in for the given column index.
+// type that values from convertCell land in for the given column index.
 // database/sql uses this when callers do sql.ColumnType.ScanType().
 func (r *Rows) ColumnTypeScanType(index int) reflect.Type {
 	colInfo := r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo[index]
@@ -302,20 +301,47 @@ func (r *Rows) Next(dest []driver.Value) error {
 	return nil
 }
 
-// fetchNextPage retrieves the next result page via the v2 SDK paginator. The
-// paginator carries the NextToken state across calls, so callers don't pass
-// a token in.
+// fetchNextPage retrieves the next result page carrying at least one usable
+// row. A page can come back empty mid-stream while the paginator still has a
+// NextToken, so keep pulling until rows arrive or the pages run out —
+// stopping at the first empty page would silently truncate the result set.
 func (r *Rows) fetchNextPage() error {
-	if r.paginator == nil || !r.paginator.HasMorePages() {
-		r.reachedLastPage = true
-		return nil
+	for {
+		if r.paginator == nil || !r.paginator.HasMorePages() {
+			r.reachedLastPage = true
+			return nil
+		}
+		if err := r.fetchOnePage(); err != nil {
+			return err
+		}
+		if len(r.ResultOutput.ResultSet.Rows) > 0 {
+			return nil
+		}
 	}
+}
+
+// fetchOnePage pulls exactly one page via the v2 SDK paginator and normalizes
+// it. The paginator carries the NextToken state across calls, so callers don't
+// pass a token in. An empty page leaves Rows empty; only fetchNextPage decides
+// whether that means end-of-stream.
+func (r *Rows) fetchOnePage() error {
 	out, err := r.paginator.NextPage(r.ctx)
 	if err != nil {
 		r.tracer.Scope().Counter(DriverName + ".failure.fetchnextpage.getqueryresults").Inc(1)
 		r.tracer.Log(ErrorLevel, "GetQueryResults failed", slog.String("error", err.Error()))
 		r.reachedLastPage = true
 		return err
+	}
+	// Athena can hand back a page with no ResultSet / ResultSetMetadata at
+	// all. Normalize it to an empty result set here — the single point every
+	// path converges on — so Columns/Next/ColumnType* can deref freely.
+	if out == nil || out.ResultSet == nil || out.ResultSet.ResultSetMetadata == nil {
+		r.ResultOutput = &athena.GetQueryResultsOutput{
+			ResultSet: &athenatypes.ResultSet{
+				ResultSetMetadata: &athenatypes.ResultSetMetadata{},
+			},
+		}
+		return nil
 	}
 	r.ResultOutput = out
 
@@ -331,9 +357,7 @@ func (r *Rows) fetchNextPage() error {
 	//     _col0
 	//     Partitions not in metastore:    elb_logs:2015/01/01     elb_logs:2015/01/02     elb_logs:2015/01/03
 	//       elb_logs:2015/01/04     elb_logs:2015/01/05     elb_logs:2015/01/06     elb_logs:2015/01/07
-	if r.ResultOutput != nil &&
-		r.ResultOutput.ResultSet.ResultSetMetadata != nil &&
-		r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo != nil {
+	if r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo != nil {
 		rowLen := len(r.ResultOutput.ResultSet.Rows)
 		colLen := len(r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo)
 		if rowLen > 0 {
@@ -348,7 +372,7 @@ func (r *Rows) fetchNextPage() error {
 				}
 			} else if colLen > rowColLen && rowColLen == 1 {
 				for k := range rowLen {
-					items := strings.Split(*r.ResultOutput.ResultSet.Rows[k].Data[0].VarCharValue, "\t")
+					items := strings.Split(aws.ToString(r.ResultOutput.ResultSet.Rows[k].Data[0].VarCharValue), "\t")
 					if len(items) == colLen {
 						for i, v := range items {
 							items[i] = strings.TrimSpace(v)
@@ -359,7 +383,7 @@ func (r *Rows) fetchNextPage() error {
 			}
 		} else if rowLen == 0 && colLen == 1 && r.ResultOutput.UpdateCount != nil {
 			if *r.ResultOutput.UpdateCount > 0 {
-				if *r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo[0].Name == "rows" {
+				if aws.ToString(r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo[0].Name) == "rows" {
 					// For DML's INSERT INTO, DDL's CTAS
 					updateCount := strconv.FormatInt(*r.ResultOutput.UpdateCount, 10)
 					rData := athenatypes.Datum{VarCharValue: &updateCount}
@@ -372,14 +396,14 @@ func (r *Rows) fetchNextPage() error {
 	var rowOffset = 0
 	if r.pageCount == 0 {
 		rs := r.ResultOutput.ResultSet
-		ci := r.ResultOutput.ResultSet.ResultSetMetadata.ColumnInfo
+		ci := rs.ResultSetMetadata.ColumnInfo
 		i := 0
 		if len(ci) > 0 && len(rs.Rows) > 0 && len(rs.Rows[0].Data) > 0 && len(rs.Rows[0].Data) == len(ci) {
 			for ; i < len(ci); i++ {
 				if rs.Rows[0].Data[i].VarCharValue == nil {
 					break
 				}
-				if *ci[i].Name != *rs.Rows[0].Data[i].VarCharValue {
+				if aws.ToString(ci[i].Name) != *rs.Rows[0].Data[i].VarCharValue {
 					break
 				}
 			}
@@ -389,9 +413,10 @@ func (r *Rows) fetchNextPage() error {
 		}
 	}
 
-	// if there is no new row, we should not continue, and this also filters out cases that Rows is nil
+	// no usable row on this page (also covers Rows being nil); leave Rows
+	// empty and let fetchNextPage decide whether more pages remain.
 	if len(r.ResultOutput.ResultSet.Rows) <= rowOffset {
-		r.reachedLastPage = true
+		r.ResultOutput.ResultSet.Rows = nil
 		return nil
 	}
 
@@ -431,8 +456,21 @@ func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.
 	if r.colMetas == nil {
 		r.buildColMetas(columns)
 	}
-	for i, val := range rdata {
-		value, err := r.convertCell(columns[i], r.colMetas[i], val.VarCharValue, driverConfig)
+	// Iterate ret, not rdata: database/sql reuses the same dest slice across
+	// Next calls, so every slot must be written. A row with fewer datums than
+	// columns feeds a nil rawValue into convertCell, which applies the
+	// configured MissingAs* policy instead of leaving the previous row's value
+	// behind.
+	for i := range ret {
+		if i >= len(columns) || i >= len(r.colMetas) {
+			ret[i] = nil
+			continue
+		}
+		var rawValue *string
+		if i < len(rdata) {
+			rawValue = rdata[i].VarCharValue
+		}
+		value, err := r.convertCell(columns[i], r.colMetas[i], rawValue, driverConfig)
 		if err != nil {
 			r.tracer.Log(ErrorLevel, "convertrow failed", slog.String("error", err.Error()))
 			r.tracer.Scope().Counter(DriverName + ".failure.convertrow").Inc(1)
@@ -443,7 +481,7 @@ func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.
 	return nil
 }
 
-// athenaTypeToGoType converts Athena type to Golang SQL type.
+// convertCell turns one Athena cell into a Go value.
 // https://docs.aws.amazon.com/en_pv/athena/latest/ug/data-types.html
 // https://docs.aws.amazon.com/athena/latest/ug/geospatial-input-data-formats-supported-geometry-types.html#geometry-data-types
 // varbinary is undocumented above, but appears in geo query like:
@@ -453,24 +491,17 @@ func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.
 // json is also undocumented above, but appears here https://docs.aws.amazon.com/athena/latest/ug/querying-JSON.html
 // The full list is here: https://prestodb.io/docs/0.172/language/types.html
 // Include ipaddress for forward compatibility.
-func (r *Rows) athenaTypeToGoType(columnInfo athenatypes.ColumnInfo, rawValue *string, driverConfig *Config) (any, error) {
-	var meta *athenaTypeMeta
-	if columnInfo.Type != nil {
-		if m, ok := athenaTypes[*columnInfo.Type]; ok {
-			meta = &m
-		}
-	}
-	return r.convertCell(columnInfo, meta, rawValue, driverConfig)
-}
-
 func (r *Rows) convertCell(columnInfo athenatypes.ColumnInfo, meta *athenaTypeMeta, rawValue *string, driverConfig *Config) (any, error) {
-	if maskedValue, masked := driverConfig.CheckColumnMasked(*columnInfo.Name); masked { // "comma ok" idiom
+	// Name and Type are both optional in the SDK — resolve once, guarded.
+	colName := aws.ToString(columnInfo.Name)
+	typeName := aws.ToString(columnInfo.Type)
+	if maskedValue, masked := driverConfig.CheckColumnMasked(colName); masked { // "comma ok" idiom
 		return maskedValue, nil
 	}
 	if rawValue == nil {
 		r.tracer.Scope().Counter(DriverName + ".missingvalue").Inc(1)
-		r.tracer.Log(ErrorLevel, "missing data",
-			slog.String("columnInfo.Name", *columnInfo.Name),
+		r.tracer.Log(DebugLevel, "missing data",
+			slog.String("columnInfo.Name", colName),
 			slog.String("queryID", r.queryID),
 			slog.String("workgroup", workgroupName(driverConfig)))
 		if driverConfig.MissingAsNil {
@@ -478,46 +509,32 @@ func (r *Rows) convertCell(columnInfo athenatypes.ColumnInfo, meta *athenaTypeMe
 		} else if driverConfig.MissingAsEmptyString {
 			return "", nil
 		} else if driverConfig.MissingAsDefault {
-			return r.getDefaultValueForColumnType(*columnInfo.Type), nil
+			if meta != nil {
+				return meta.defaultVal, nil
+			}
+			r.tracer.Scope().Counter(DriverName + ".failure.defaultvalueforcolumntype.type").Inc(1)
+			r.tracer.Log(ErrorLevel, "column data type error", slog.String("columnInfo.Type", typeName))
+			return "", nil
 		}
 		r.tracer.Scope().Counter(DriverName + ".failure.convertvalue.config").Inc(1)
-		r.tracer.Log(ErrorLevel, "missing data", slog.String("columnInfo.Name", *columnInfo.Name))
-		return nil, fmt.Errorf("missing data at column %s", *columnInfo.Name)
+		r.tracer.Log(ErrorLevel, "missing data", slog.String("columnInfo.Name", colName))
+		return nil, fmt.Errorf("missing data at column %s", colName)
 	}
 	if meta == nil {
 		r.tracer.Scope().Counter(DriverName + ".failure.convertvalue.type").Inc(1)
-		typeName := ""
-		if columnInfo.Type != nil {
-			typeName = *columnInfo.Type
-		}
 		r.tracer.Log(ErrorLevel, "column data type error", slog.String("columnInfo.Type", typeName))
 		return nil, fmt.Errorf("unknown type `%s` with value %s", typeName, *rawValue)
 	}
 	val, err := meta.parse(*rawValue)
 	if err != nil {
 		bucket := "convertvalue"
-		if columnInfo.Type != nil {
-			switch *columnInfo.Type {
-			case "boolean":
-				bucket = "convertvalue.boolean"
-			case "date", "time", "time with time zone", "timestamp", "timestamp with time zone":
-				bucket = "convertvalue.time"
-			}
+		switch typeName {
+		case "boolean":
+			bucket = "convertvalue.boolean"
+		case "date", "time", "time with time zone", "timestamp", "timestamp with time zone":
+			bucket = "convertvalue.time"
 		}
 		r.tracer.Scope().Counter(DriverName + ".failure." + bucket).Inc(1)
 	}
 	return val, err
-}
-
-// getDefaultValueForColumnType is used internally by athenaTypeToGoType to
-// get default value for a column type when the row has no value for it and
-// MissingAsDefault is enabled. Unknown types log + meter and fall back to
-// the empty string.
-func (r *Rows) getDefaultValueForColumnType(athenaType string) any {
-	if meta, ok := athenaTypes[athenaType]; ok {
-		return meta.defaultVal
-	}
-	r.tracer.Scope().Counter(DriverName + ".failure.defaultvalueforcolumntype.type").Inc(1)
-	r.tracer.Log(ErrorLevel, "column data type error", slog.String("columnInfo.Type", athenaType))
-	return ""
 }

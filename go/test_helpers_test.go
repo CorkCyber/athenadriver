@@ -160,13 +160,13 @@ func randDatumFor(athenaType string) *string {
 
 func missingDataRow(columns []athenatypes.ColumnInfo) athenatypes.Row {
 	row := athenatypes.Row{Data: make([]athenatypes.Datum, len(columns))}
-	// All cells get a nil VarCharValue to simulate a missing-data response
-	// — the original implementation switched on Type but every branch
+	// All cells get a nil VarCharValue to simulate a missing-data response.
+	// The original implementation switched on Type, but every branch
 	// produced the same Datum, so the switch has been collapsed.
 	return row
 }
 
-// columnTypes must be from one of AthenaColumnTypes.
+// columnTypes must be Athena column type names (see athenaTypes).
 func newHeaderResultPage(columnNames []*string, columnTypes []string, rowsData [][]*string) *athena.GetQueryResultsOutput {
 	columns := make([]athenatypes.ColumnInfo, len(columnNames))
 	for i := range columnNames {

@@ -18,8 +18,6 @@ var (
 	ErrQueryTimeout                 = errors.New("query timeout")
 	ErrAthenaTransactionUnsupported = errors.New("Athena doesn't support transaction statements")
 	ErrAthenaNilClient              = errors.New("athenaClient must not be nil")
-	ErrTestMockGeneric              = errors.New("some_mock_error_for_test")
-	ErrTestMockFailedByAthena       = errors.New("the reason why Athena failed the query")
 )
 
 // QueryFailureError is returned when Athena reports a query in the FAILED

@@ -77,8 +77,9 @@ const (
 	DefaultCatalog = "AwsDataCatalog"
 
 	// DummyRegion is a sentinel value used by the auth/lambda examples when
-	// they rely on AWS_SDK_LOAD_CONFIG / IRSA / instance profile and want
-	// the driver's DSN-driven static credentials path to no-op.
+	// they rely on the default aws-sdk-go-v2 credential chain (shared
+	// config, IRSA, instance profile, SSO) and want the driver's
+	// DSN-driven static credentials path to no-op.
 	DummyRegion = "dummy"
 
 	// DummyAccessID — see DummyRegion.
@@ -125,13 +126,6 @@ const (
 	// This is not an adjustable quota. (unit bytes)
 	MAXQueryStringLength = 262144
 )
-
-// AthenaColumnTypes is a fixed array of Athena Column Types. An array isn't immutable by nature; you can't make it constant.
-var AthenaColumnTypes = [...]string{"tinyint", "smallint", "integer", "bigint", "float", "real", "double",
-	"json", "char", "varchar", "varbinary", "row", "string", "binary",
-	"struct", "interval year to month", "interval day to second", "decimal",
-	"ipaddress", "array", "map", "unknown", "boolean", "date", "time", "time with time zone",
-	"timestamp with time zone", "timestamp", "weird_type"}
 
 // pseudo commands all start with `PC_`
 

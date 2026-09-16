@@ -90,7 +90,12 @@ func TestRandRow(t *testing.T) {
 	assert.Equal(t, len(r.Data), 1)
 	assert.Equal(t, "a\tb", *r.Data[0].VarCharValue)
 
-	for _, ty := range AthenaColumnTypes {
+	for _, ty := range []string{"tinyint", "smallint", "integer", "bigint",
+		"float", "real", "double", "json", "char", "varchar", "varbinary",
+		"row", "string", "binary", "struct", "interval year to month",
+		"interval day to second", "decimal", "ipaddress", "array", "map",
+		"unknown", "boolean", "date", "time", "time with time zone",
+		"timestamp with time zone", "timestamp", "weird_type"} {
 		c1 := newColumnInfo("c1", ty)
 		r := randRow([]athenatypes.ColumnInfo{c1})
 		assert.Equal(t, len(r.Data), 1)

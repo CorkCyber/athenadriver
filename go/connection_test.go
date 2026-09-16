@@ -134,18 +134,30 @@ func TestConnection_Close(t *testing.T) {
 
 }
 
-func TestConnection_BeginAndBeginTx(t *testing.T) {
+// TestQueryContext_LiteralQuestionMark is the regression guard for
+// running interpolateParams (and its naive `?`-counting check) on the
+// ExecutionParameters path: a `?` inside a string literal is not a
+// placeholder, and Athena — not the driver — validates placeholder count.
+func TestQueryContext_LiteralQuestionMark(t *testing.T) {
+	t.Parallel()
+	c := newTestConnWithWG(func(cfg *Config, _ *mockAthenaClient) {
+		cfg.WorkGroup = nil // skip remote workgroup resolution
+	})
+	nm := c.athenaClient.(*mockAthenaClient)
+
+	_, err := c.QueryContext(context.Background(), "select ? , 'what?'",
+		[]driver.NamedValue{{Value: int64(1)}})
+	assert.Nil(t, err)
+	assert.Equal(t, "select ? , 'what?'", *nm.lastStartInput.QueryString)
+	assert.Equal(t, []string{"1"}, nm.lastStartInput.ExecutionParameters)
+}
+
+func TestConnection_Begin(t *testing.T) {
 	c := createTestConnection(t)
-	const wantErr = "Athena doesn't support transaction statements"
 
 	tx, err := c.Begin()
 	assert.Nil(t, tx)
-	assert.EqualError(t, err, wantErr)
-
-	txCtx, err := c.BeginTx(context.Background(),
-		&sql.TxOptions{Isolation: sql.LevelSerializable})
-	assert.Nil(t, txCtx)
-	assert.EqualError(t, err, wantErr)
+	assert.EqualError(t, err, "Athena doesn't support transaction statements")
 }
 
 func TestConnection_Transaction(t *testing.T) {
@@ -407,14 +419,6 @@ func TestBuildExecutionParams_RejectsNonFiniteFloats(t *testing.T) {
 	}
 }
 
-func TestCheckNamedValue(t *testing.T) {
-	c := createTestConnection(t)
-	value := driver.NamedValue{Value: uint64(0)}
-	err := c.CheckNamedValue(&value)
-	assert.Nil(t, err)
-	assert.Equal(t, int64(0), value.Value)
-}
-
 func createTestConnection(t *testing.T) *Connection {
 	t.Parallel()
 	testConf := NewNoOpsConfig()
@@ -571,7 +575,9 @@ func TestConnection_QueryContext7(t *testing.T) {
 	assert.NotNil(t, err)
 	assert.Nil(t, driverRows)
 
-	// After 3 seconds to get a timeout error
+	// Query stays Queued; a 1-second service limit trips the timeout on
+	// the first poll.
+	c.connector.config.ServiceLimit = &ServiceLimitOverride{DDLQueryTimeout: 1, DMLQueryTimeout: 1}
 	query = "SELECTQueryContext_TIMEOUT"
 	ctx, cancel = context.WithTimeout(context.Background(), 1*time.Hour)
 	defer cancel()
@@ -761,6 +767,13 @@ func Test_PseudoCommand(t *testing.T) {
 	assert.Nil(t, dr)
 
 	query = "pc:get_query_id_status"
+	dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
+	assert.NotNil(t, er)
+	assert.Nil(t, dr)
+
+	// GetQueryExecution returns a non-nil output with a nil Status: must
+	// error, not panic on nil deref.
+	query = "pc:get_query_id_status c89088ab-595d-4ee6-a9ce-73b55aeb8nil"
 	dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
 	assert.NotNil(t, er)
 	assert.Nil(t, dr)

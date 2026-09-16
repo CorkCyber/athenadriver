@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/athena"
 	"github.com/stretchr/testify/assert"
 )
@@ -24,6 +25,20 @@ import (
 // which all must be assignable to the type T.
 func variadicToSlice(dest ...driver.Value) []driver.Value {
 	return dest
+}
+
+// athenaTypeToGoType is a test-only shim: it does the same athenaTypes lookup
+// buildColMetas does once per Rows, then hands off to convertCell. Keeps the
+// per-type conversion cases below readable without a second production code
+// path for the same map.
+func (r *Rows) athenaTypeToGoType(columnInfo athenatypes.ColumnInfo, rawValue *string, driverConfig *Config) (any, error) {
+	var meta *athenaTypeMeta
+	if columnInfo.Type != nil {
+		if m, ok := athenaTypes[*columnInfo.Type]; ok {
+			meta = &m
+		}
+	}
+	return r.convertCell(columnInfo, meta, rawValue, driverConfig)
 }
 
 func TestOnePageSuccess(t *testing.T) {
@@ -213,42 +228,42 @@ func TestRows_ColumnTypeDatabaseTypeName(t *testing.T) {
 	}
 }
 
-func TestRows_GetDefaultValueForColumnType(t *testing.T) {
+func TestRows_MissingAsDefaultValue(t *testing.T) {
 	testConf := NewNoOpsConfig()
-	tests := []struct {
-		desc                string
-		queryID             string
-		expectedResultsSize int
-		expectedError       error
-	}{
-		{
-			desc:                "select query, header, multiple pages",
-			queryID:             "SELECT_OK",
-			expectedResultsSize: 35,
-			expectedError:       nil,
-		},
+	testConf.MissingAsDefault = true
+	testConf.MissingAsNil = false
+	testConf.MissingAsEmptyString = false
+	r, _ := NewRows(context.Background(), newMockAthenaClient(),
+		"SELECT_OK", testConf, NewObservability(testConf, nil, nil))
+
+	// convertCell returns the resolved meta's default when the cell is missing.
+	check := func(typeName string, expected any) {
+		t.Helper()
+		meta := athenaTypes[typeName]
+		v, err := r.convertCell(newColumnInfo("c", typeName), &meta, nil, testConf)
+		assert.NoError(t, err)
+		assert.Equal(t, expected, v)
 	}
-	for _, test := range tests {
-		r, _ := NewRows(context.Background(), newMockAthenaClient(),
-			test.queryID,
-			testConf, NewObservability(testConf, nil, nil))
-		for _, v := range []string{"tinyint", "smallint", "integer", "bigint"} {
-			assert.Equal(t, 0, r.getDefaultValueForColumnType(v))
-		}
-		for _, v := range []string{"json", "char", "varchar", "varbinary", "row", "string", "binary",
-			"struct", "interval year to month", "interval day to second", "decimal",
-			"ipaddress", "array", "map", "unknown"} {
-			assert.Equal(t, "", r.getDefaultValueForColumnType(v))
-		}
-		for _, v := range []string{"float", "double", "real"} {
-			assert.Equal(t, 0.0, r.getDefaultValueForColumnType(v))
-		}
-		for _, v := range []string{"date", "time", "time with time zone", "timestamp", "timestamp with time zone"} {
-			assert.Equal(t, r.getDefaultValueForColumnType(v), time.Time{})
-		}
-		assert.Equal(t, false, r.getDefaultValueForColumnType("boolean"))
-		assert.Equal(t, "", r.getDefaultValueForColumnType("XXX"))
+	for _, v := range []string{"tinyint", "smallint", "integer", "bigint"} {
+		check(v, 0)
 	}
+	for _, v := range []string{"json", "char", "varchar", "varbinary", "row", "string", "binary",
+		"struct", "interval year to month", "interval day to second", "decimal",
+		"ipaddress", "array", "map", "unknown"} {
+		check(v, "")
+	}
+	for _, v := range []string{"float", "double", "real"} {
+		check(v, 0.0)
+	}
+	for _, v := range []string{"date", "time", "time with time zone", "timestamp", "timestamp with time zone"} {
+		check(v, time.Time{})
+	}
+	check("boolean", false)
+
+	// unknown type: no meta resolved, falls back to the empty string.
+	v, err := r.convertCell(newColumnInfo("c", "XXX"), nil, nil, testConf)
+	assert.NoError(t, err)
+	assert.Equal(t, "", v)
 }
 
 func TestRows_AthenaTypeToGoType(t *testing.T) {
@@ -426,6 +441,30 @@ func TestRows_AthenaTypeToGoType(t *testing.T) {
 	assert.Equal(t, "xxx", g)
 }
 
+// database/sql reuses the same dest slice across Next calls, so a row with
+// fewer datums than columns must not leak the previous row's trailing values.
+func TestRows_ConvertRowShortRowClearsTail(t *testing.T) {
+	testConf := NewNoOpsConfig()
+	testConf.MissingAsNil = true
+	testConf.MissingAsEmptyString = false
+	testConf.MissingAsDefault = false
+	r, _ := NewRows(context.Background(), newMockAthenaClient(),
+		"SELECT_OK", testConf, NewObservability(testConf, nil, nil))
+
+	cols := []athenatypes.ColumnInfo{newColumnInfo("a", "integer"), newColumnInfo("b", "integer")}
+	dest := make([]driver.Value, 3)
+	r.colMetas = nil
+
+	full := []athenatypes.Datum{{VarCharValue: aws.String("1")}, {VarCharValue: aws.String("2")}}
+	assert.Nil(t, r.convertRow(cols, full, dest, testConf))
+	assert.Equal(t, []driver.Value{int32(1), int32(2), nil}, dest)
+
+	// Second row has only one datum: columns 2 and 3 must be reset, not stale.
+	short := []athenatypes.Datum{{VarCharValue: aws.String("9")}}
+	assert.Nil(t, r.convertRow(cols, short, dest, testConf))
+	assert.Equal(t, []driver.Value{int32(9), nil, nil}, dest)
+}
+
 func TestRows_ColumnTypeDatabaseTypeName2(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	r, _ := NewRows(context.Background(), newMockAthenaClient(),
@@ -442,6 +481,23 @@ func TestRows_ColumnTypeDatabaseTypeName2(t *testing.T) {
 	}
 	r.ResultOutput = getQueryResultsOutput
 	assert.Equal(t, "", r.ColumnTypeDatabaseTypeName(0))
+}
+
+// TestRows_NilResultSetNormalizedToEmpty pins fetchOnePage's guard against a
+// page with no ResultSet/ResultSetMetadata at all (Athena can return this):
+// it must normalize to an empty result set, not panic on nil deref.
+func TestRows_NilResultSetNormalizedToEmpty(t *testing.T) {
+	testConf := NewNoOpsConfig()
+	r, e := NewRows(context.Background(), newMockAthenaClient(),
+		"nil_resultset",
+		testConf, NewObservability(testConf, nil, nil))
+	assert.Nil(t, e)
+	assert.NotNil(t, r)
+	assert.NotNil(t, r.ResultOutput.ResultSet)
+	assert.NotNil(t, r.ResultOutput.ResultSet.ResultSetMetadata)
+	assert.Empty(t, r.Columns())
+	dest := make([]driver.Value, 1)
+	assert.Equal(t, io.EOF, r.Next(dest))
 }
 
 func TestRows_NewRows(t *testing.T) {
@@ -520,19 +576,24 @@ func TestRows_NewRows(t *testing.T) {
 		}
 	}
 
-	// missing row in page
+	// an empty page mid-stream must not truncate: every row of every page
+	// is returned (5 after the header + 0 + 5 + 5) before the fixture's
+	// forced error on the following page.
 	r, e = NewRows(context.Background(), newMockAthenaClient(),
 		"SELECT_EMPTY_ROW_IN_PAGE",
 		testConf, NewObservability(testConf, nil, nil))
 	assert.Nil(t, e)
 	assert.NotNil(t, r)
+	rowCount := 0
 	for {
 		e = r.Next(dest)
 		if e != nil {
-			assert.Equal(t, io.EOF, e)
+			assert.Equal(t, ErrTestMockGeneric, e)
 			break
 		}
+		rowCount++
 	}
+	assert.Equal(t, 15, rowCount)
 
 	// close in the loop
 	r, e = NewRows(context.Background(), newMockAthenaClient(),

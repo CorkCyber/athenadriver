@@ -109,20 +109,6 @@ func TestStatement_Query_After_Close(t *testing.T) {
 	assert.Equal(t, driver.ErrBadConn, err)
 }
 
-func TestStatement_ColumnConverter(t *testing.T) {
-	testConf := NewNoOpsConfig()
-	connector := &SQLConnector{
-		config: testConf,
-	}
-
-	conn, _ := connector.Connect(context.Background())
-	st := Statement{
-		connection: conn.(*Connection),
-		query:      "abc=?",
-	}
-	assert.NotNil(t, st.ColumnConverter(0))
-}
-
 func TestStatement_Close(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	connector := &SQLConnector{

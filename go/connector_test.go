@@ -4,7 +4,6 @@ package athenadriver
 
 import (
 	"context"
-	"os"
 	"testing"
 	"time"
 
@@ -53,65 +52,71 @@ func TestSQLConnector_Connect(t *testing.T) {
 	assert.Equal(t, "Athena doesn't support transaction statements", err.Error())
 }
 
-func TestSQLConnector_Connect_NewSessionFail(t *testing.T) {
-	testConf := NewNoOpsConfig()
-	_ = testConf.SetRegion("ap-southeast-1")
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "1")
-	os.Setenv("AWS_STS_REGIONAL_ENDPOINTS", "123")
-	connector := &SQLConnector{
-		config: testConf,
+// noDSNCredentials clears the credential env vars so the connector under
+// test falls through to config.LoadDefaultConfig instead of the DSN/env
+// static-credentials branch.
+func noDSNCredentials(t *testing.T) {
+	t.Helper()
+	for _, k := range []string{"AWS_ACCESS_KEY_ID", "AWS_ACCESS_KEY",
+		"AWS_SECRET_ACCESS_KEY", "AWS_SECRET_KEY", "AWS_SESSION_TOKEN"} {
+		t.Setenv(k, "")
 	}
-	conn, err := connector.Connect(context.Background())
-	tx, err := conn.Begin()
-
-	os.Unsetenv("AWS_SDK_LOAD_CONFIG")
-	os.Unsetenv("AWS_STS_REGIONAL_ENDPOINTS")
-	assert.NotNil(t, err)
-	assert.Nil(t, tx)
 }
 
-func TestSQLConnector_Connect_NewSession_AWS_SDK_LOAD_CONFIG_true(t *testing.T) {
+// TestSQLConnector_Connect_DefaultChain is the regression guard for the
+// v1-era AWS_SDK_LOAD_CONFIG gate: with no profile and no static
+// credentials the connector must still resolve through
+// config.LoadDefaultConfig, which always yields a non-nil credentials
+// provider (IMDS / container creds / SSO / shared config), never a
+// credential-less aws.Config.
+func TestSQLConnector_Connect_DefaultChain(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	_ = testConf.SetRegion("ap-southeast-1")
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "true")
-	connector := &SQLConnector{
-		config: testConf,
-	}
-	conn, err := connector.Connect(context.Background())
+	noDSNCredentials(t)
+	connector := &SQLConnector{config: testConf}
 
-	os.Unsetenv("AWS_SDK_LOAD_CONFIG")
+	awsCfg, err := connector.resolveAWSConfig(context.Background())
+	assert.Nil(t, err)
+	assert.NotNil(t, awsCfg.Credentials)
+
+	conn, err := connector.Connect(context.Background())
 	assert.Nil(t, err)
 	assert.NotNil(t, conn)
 }
 
-func TestSQLConnector_Connect_NewSession_AWS_SDK_LOAD_CONFIG_true_AWSProfile_Set(t *testing.T) {
+func TestSQLConnector_Connect_AWSProfile_Set(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	_ = testConf.SetRegion("ap-southeast-1")
 	testConf.AWSProfile = "hello-profile"
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "true")
 	connector := &SQLConnector{
 		config: testConf,
 	}
 	conn, err := connector.Connect(context.Background())
 
-	os.Unsetenv("AWS_SDK_LOAD_CONFIG")
 	// In aws-sdk-go-v2 you cannot load a nonexistent profile
 	assert.NotNil(t, err)
 	assert.Nil(t, conn)
+
+	// The cached resolution failure is replayed, not retried into a
+	// half-built connector.
+	conn, err2 := connector.Connect(context.Background())
+	assert.Equal(t, err, err2)
+	assert.Nil(t, conn)
 }
 
-func TestSQLConnector_Connect_NewSession_AWS_SDK_LOAD_CONFIG_false(t *testing.T) {
+// TestSQLConnector_Connect_SharesClient pins the pooling fix: every
+// connection a connector hands out must reuse one *athena.Client, not
+// build its own credential chain and HTTP transport.
+func TestSQLConnector_Connect_SharesClient(t *testing.T) {
 	testConf := NewNoOpsConfig()
 	_ = testConf.SetRegion("ap-southeast-1")
-	os.Setenv("AWS_SDK_LOAD_CONFIG", "0")
-	connector := &SQLConnector{
-		config: testConf,
-	}
-	conn, err := connector.Connect(context.Background())
+	connector := &SQLConnector{config: testConf}
 
-	os.Unsetenv("AWS_SDK_LOAD_CONFIG")
+	c1, err := connector.Connect(context.Background())
 	assert.Nil(t, err)
-	assert.NotNil(t, conn)
+	c2, err := connector.Connect(context.Background())
+	assert.Nil(t, err)
+	assert.Same(t, c1.(*Connection).athenaClient, c2.(*Connection).athenaClient)
 }
 
 func TestSQLConnector_Connect_NewSession_Credentials(t *testing.T) {

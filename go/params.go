@@ -158,9 +158,3 @@ func (c *Connection) interpolateParams(query string, args []driver.Value) (strin
 	}
 	return string(queryBuffer), nil
 }
-
-// CheckNamedValue is to implement interface driver.NamedValueChecker.
-func (c *Connection) CheckNamedValue(nv *driver.NamedValue) (err error) {
-	nv.Value, err = driver.DefaultParameterConverter.ConvertValue(nv.Value)
-	return
-}

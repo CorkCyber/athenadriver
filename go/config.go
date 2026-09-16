@@ -3,6 +3,7 @@
 package athenadriver
 
 import (
+	"cmp"
 	"fmt"
 	"maps"
 	"net/url"
@@ -101,7 +102,7 @@ var (
 	}
 	regionEnvKeys = []string{
 		"AWS_REGION",
-		"AWS_DEFAULT_REGION", // Only read if AWS_SDK_LOAD_CONFIG is also set
+		"AWS_DEFAULT_REGION", // Fallback when AWS_REGION is unset
 	}
 )
 
@@ -191,7 +192,7 @@ func NewConfig(dsn string) (*Config, error) {
 // fields. Unknown keys are silently ignored so callers can carry
 // custom state through the DSN without confusing the driver.
 func (c *Config) fromQuery(q url.Values) error {
-	c.DB = orDefault(q.Get("db"), DefaultDBName)
+	c.DB = cmp.Or(q.Get("db"), DefaultDBName)
 	c.Region = q.Get("region")
 	c.AccessID = q.Get("accessID")
 	c.SecretAccessKey = q.Get("secretAccessKey")
@@ -287,13 +288,6 @@ func (c *Config) fromQuery(q url.Values) error {
 		}
 	}
 	return nil
-}
-
-func orDefault(v, dflt string) string {
-	if v != "" {
-		return v
-	}
-	return dflt
 }
 
 // parseTags decodes a tag DSN value of the form `|key1`val1|key2`val2`
@@ -533,46 +527,31 @@ func (c *Config) SetMaskedColumnValue(column, value string) {
 // AccessIDOrEnv returns the explicit access ID or the AWS_ACCESS_KEY_ID
 // / AWS_ACCESS_KEY environment variable when the field is empty.
 func (c *Config) AccessIDOrEnv() string {
-	if c.AccessID != "" {
-		return c.AccessID
-	}
-	return GetFromEnvVal(credAccessEnvKey)
+	return cmp.Or(c.AccessID, GetFromEnvVal(credAccessEnvKey))
 }
 
 // SecretAccessKeyOrEnv returns the explicit secret or the
 // AWS_SECRET_ACCESS_KEY / AWS_SECRET_KEY environment variable.
 func (c *Config) SecretAccessKeyOrEnv() string {
-	if c.SecretAccessKey != "" {
-		return c.SecretAccessKey
-	}
-	return GetFromEnvVal(credSecretEnvKey)
+	return cmp.Or(c.SecretAccessKey, GetFromEnvVal(credSecretEnvKey))
 }
 
 // SessionTokenOrEnv returns the explicit session token or the
 // AWS_SESSION_TOKEN environment variable.
 func (c *Config) SessionTokenOrEnv() string {
-	if c.SessionToken != "" {
-		return c.SessionToken
-	}
-	return GetFromEnvVal(credSessionEnvKey)
+	return cmp.Or(c.SessionToken, GetFromEnvVal(credSessionEnvKey))
 }
 
 // RegionOrEnv returns the explicit region or AWS_REGION /
 // AWS_DEFAULT_REGION.
 func (c *Config) RegionOrEnv() string {
-	if c.Region != "" {
-		return c.Region
-	}
-	return GetFromEnvVal(regionEnvKeys)
+	return cmp.Or(c.Region, GetFromEnvVal(regionEnvKeys))
 }
 
 // CatalogOrDefault returns the configured catalog or DefaultCatalog
 // (AwsDataCatalog).
 func (c *Config) CatalogOrDefault() string {
-	if c.Catalog != "" {
-		return c.Catalog
-	}
-	return DefaultCatalog
+	return cmp.Or(c.Catalog, DefaultCatalog)
 }
 
 // PollInterval returns the initial GetQueryExecution poll interval,

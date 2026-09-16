@@ -4,7 +4,6 @@ package athenadriver
 
 import (
 	"context"
-	"database/sql"
 	"database/sql/driver"
 	"errors"
 	"fmt"
@@ -121,11 +120,16 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 	// Length validation gates on whichever form actually goes to Athena
 	// (what counts against the 262 KiB query cap).
 	if len(namedArgs) > 0 {
-		interpolated, ierr := c.interpolateParams(query, args)
-		if ierr != nil {
-			return nil, ierr
-		}
+		// Only interpolate when the interpolated form is what goes to
+		// Athena. On the ExecutionParameters path Athena validates the
+		// placeholder count server-side; running interpolateParams there
+		// would both waste an allocation and reject valid queries, since
+		// its `?`-count check also counts `?` inside string literals.
 		if !executionParamsSupported(query) {
+			interpolated, ierr := c.interpolateParams(query, args)
+			if ierr != nil {
+				return nil, ierr
+			}
 			query = interpolated
 			args = nil
 		}
@@ -156,6 +160,11 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 					slog.String("error", err.Error()))
 				obs.Scope().Counter(DriverName + ".failure.querycontext.getqueryexecutionwithcontext").Inc(1)
 				return nil, err
+			}
+			if statusResp == nil || statusResp.QueryExecution == nil ||
+				statusResp.QueryExecution.Status == nil {
+				obs.Scope().Counter(DriverName + ".failure.querycontext.getqueryexecutionwithcontext").Inc(1)
+				return nil, fmt.Errorf("GetQueryExecution returned no status for query ID %q", query)
 			}
 			return c.getHeaderlessSingleRowResultPage(ctx, string(statusResp.QueryExecution.Status.State))
 		}
@@ -285,23 +294,39 @@ func (c *Connection) resolveWorkgroup(ctx context.Context) (Workgroup, error) {
 	if wg.Name == DefaultWGName {
 		return wg, nil
 	}
+	// The workgroup identity is fixed at connector construction, so the
+	// existence/enabled check is worth exactly one GetWorkGroup call per
+	// connector rather than one per query. Only success is cached.
+	if c.connector.wgVerified.Load() {
+		return wg, nil
+	}
 	athenaWG, err := getWG(ctx, c.athenaClient, wg.Name)
 	if err != nil {
 		obs.Scope().Counter(DriverName + ".failure.querycontext.getwg").Inc(1)
 		obs.Log(WarnLevel, "Didn't find workgroup "+wg.Name+" due to: "+err.Error())
-		var re *awshttp.ResponseError
-		if errors.As(err, &re) && !strings.Contains(err.Error(), "WorkGroup is not found.") {
+		if !isWGNotFound(err) {
+			// Anything that is not Athena telling us the workgroup does
+			// not exist (network blip, credentials, throttling) must be
+			// surfaced, never treated as "absent, go create it".
 			return wg, err
 		}
 		if !c.connector.config.WGRemoteCreation {
 			obs.Log(WarnLevel, "workgroup "+DefaultWGName+" is used for "+wg.Name+".")
 			return wg, fmt.Errorf("workgroup %q doesn't exist and workgroup remote creation is disabled: %w", wg.Name, err)
 		}
-		if err := wg.CreateWGRemotely(ctx, c.athenaClient); err != nil {
-			obs.Scope().Counter(DriverName + ".failure.querycontext.createwgremotely").Inc(1)
-			return wg, err
+		if cerr := wg.CreateWGRemotely(ctx, c.athenaClient); cerr != nil {
+			// Concurrent cold start: several connections can observe the
+			// same miss and race to create. Losing that race is success,
+			// so re-check before reporting a failure.
+			if _, gerr := getWG(ctx, c.athenaClient, wg.Name); gerr != nil {
+				obs.Scope().Counter(DriverName + ".failure.querycontext.createwgremotely").Inc(1)
+				return wg, cerr
+			}
+			obs.Log(DebugLevel, "workgroup "+wg.Name+" was created concurrently.")
+		} else {
+			obs.Log(DebugLevel, "workgroup "+wg.Name+" is created successfully.")
 		}
-		obs.Log(DebugLevel, "workgroup "+wg.Name+" is created successfully.")
+		c.connector.wgVerified.Store(true)
 		return wg, nil
 	}
 	if athenaWG.State != athenatypes.WorkGroupStateEnabled {
@@ -310,7 +335,15 @@ func (c *Connection) resolveWorkgroup(ctx context.Context) (Workgroup, error) {
 		return wg, fmt.Errorf("workgroup %q is disabled", wg.Name)
 	}
 	obs.Log(DebugLevel, "workgroup "+DefaultWGName+" is enabled.")
+	c.connector.wgVerified.Store(true)
 	return wg, nil
+}
+
+// isWGNotFound reports whether err is Athena's modeled "this workgroup
+// does not exist" response, as opposed to any other failure.
+func isWGNotFound(err error) bool {
+	var ire *athenatypes.InvalidRequestException
+	return errors.As(err, &ire) && strings.Contains(aws.ToString(ire.Message), "is not found")
 }
 
 // Ping implements driver.Pinger interface.
@@ -344,11 +377,6 @@ func (c *Connection) Prepare(query string) (driver.Stmt, error) {
 
 // Begin is from Conn interface, but no implementation for AWS Athena.
 func (c *Connection) Begin() (driver.Tx, error) {
-	return nil, ErrAthenaTransactionUnsupported
-}
-
-// BeginTx is to replace Begin as it is deprecated.
-func (c *Connection) BeginTx(ctx context.Context, opts *sql.TxOptions) (*sql.Tx, error) {
 	return nil, ErrAthenaTransactionUnsupported
 }
 

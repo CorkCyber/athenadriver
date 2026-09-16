@@ -49,19 +49,10 @@ func getWG(ctx context.Context, client AthenaClient, Name string) (*athenatypes.
 
 // CreateWGRemotely is to create a Workgroup remotely.
 func (w *Workgroup) CreateWGRemotely(ctx context.Context, athenaClient AthenaClient) error {
-	tags := w.Tags.Get()
-	var err error
-	if len(tags) == 0 {
-		_, err = athenaClient.CreateWorkGroup(ctx, &athena.CreateWorkGroupInput{
-			Configuration: w.Config,
-			Name:          aws.String(w.Name),
-		})
-	} else {
-		_, err = athenaClient.CreateWorkGroup(ctx, &athena.CreateWorkGroupInput{
-			Configuration: w.Config,
-			Name:          aws.String(w.Name),
-			Tags:          w.Tags.Get(),
-		})
-	}
+	_, err := athenaClient.CreateWorkGroup(ctx, &athena.CreateWorkGroupInput{
+		Configuration: w.Config,
+		Name:          aws.String(w.Name),
+		Tags:          w.Tags.Get(),
+	})
 	return err
 }

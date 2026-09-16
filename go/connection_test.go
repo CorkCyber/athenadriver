@@ -892,6 +892,15 @@ func Test_PseudoCommand(t *testing.T) {
 	dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
 	assert.Nil(t, er)
 	assert.NotNil(t, dr)
+
+	// A command that merely starts with get_driver_version is not that
+	// command: it must fall through to the "doesn't exist" error.
+	for _, query := range []string{"pc:get_driver_version_history", "pc:get_driver_versionn"} {
+		dr, er = c.ExecContext(context.Background(), query, []driver.NamedValue{})
+		assert.NotNil(t, er, query)
+		assert.Contains(t, er.Error(), "doesn't exist", query)
+		assert.Nil(t, dr, query)
+	}
 }
 
 // --- workgroup resolution: AWS error classification -----------------------

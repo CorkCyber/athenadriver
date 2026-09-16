@@ -15,38 +15,32 @@ import (
 )
 
 // ErrQueryCancelledByAthena is returned when Athena reports the query in the
-// CANCELLED state — distinct from context.Canceled, which means the caller's
-// own context was cancelled. The wrapped message carries Athena's
+// CANCELLED state (distinct from context.Canceled, which means the caller's
+// own context was cancelled). The wrapped message carries Athena's
 // StateChangeReason.
 var ErrQueryCancelledByAthena = errors.New("query cancelled by Athena")
 
-// awaitQueryCompletion polls GetQueryExecution until the query reaches a
-// terminal state (Succeeded / Failed / Cancelled), the caller's context is
-// cancelled, or the per-statement-type timeout elapses. On any non-success
-// outcome it best-effort issues StopQueryExecution so the server-side query
-// is not left running off-ctx, and returns an appropriate error. queryStart
-// is the time we issued StartQueryExecution (used for the per-statement
-// timeout); loopStart is used for "time since polling began" metrics.
+// awaitQueryCompletion polls GetQueryExecution until terminal state, ctx
+// cancellation, or the per-statement timeout. On ctx cancellation or a
+// client-side timeout it best-effort issues StopQueryExecution so the query
+// doesn't run off-ctx; an Athena-reported CANCELLED/FAILED state needs no
+// such call since Athena has already stopped the query itself.
+// queryStart = StartQueryExecution time (for the timeout); loopStart =
+// polling-began time (for metrics).
 func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, query string, queryStart, loopStart time.Time) (*athenatypes.QueryExecution, error) {
 	obs := c.tracer
 	pollInterval := c.connector.config.PollInterval()
 	maxPoll := c.connector.config.PollMaxInterval()
 	multiplier := c.connector.config.PollBackoffMultiplier()
-	// One timer reused across poll iterations. Avoids the per-iteration
-	// allocation + leak of `time.After`, which keeps a timer alive until
-	// it fires even if the select picked ctx.Done() instead. Since go1.23
-	// Stop/Reset are synchronized with the timer firing, so no stale value
-	// can survive a Reset and no draining is needed (draining would in fact
-	// deadlock when Stop() already consumed the value).
+	// One timer reused across iterations, to avoid time.After's per-call
+	// leak. go1.23+ Stop/Reset synchronize with firing, so no draining
+	// needed (draining would deadlock if Stop() already consumed the value).
 	timer := time.NewTimer(pollInterval)
 	defer timer.Stop()
 	for {
-		// Short-circuit if the caller has already cancelled before we issue
-		// the next GetQueryExecution. Avoids a wasted round-trip and lets us
-		// reach the cancellation path that also issues StopQueryExecution.
-		// stopQueryOnCancel already logs + counts its own failure; we must
-		// return the bare ctx.Err() so callers doing `err == context.Canceled`
-		// (or DeadlineExceeded) keep working.
+		// Short-circuit an already-cancelled ctx: skip the round-trip,
+		// still reach the StopQueryExecution cleanup path. Return bare
+		// ctx.Err() so `err == context.Canceled` checks keep working.
 		if err := ctx.Err(); err != nil {
 			c.stopQueryOnCancel(ctx, queryID, wgName, query, obs, loopStart)
 			return nil, err
@@ -84,12 +78,9 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 			if c.connector.config.MoneyWise {
 				printCost(c.connector.config.RegionOrEnv(), statusResp)
 			}
-			// NOT context.Canceled: Athena cancels queries server-side for
-			// reasons unrelated to the caller's context (workgroup
-			// BytesScannedCutoffPerQuery, an admin StopQueryExecution, a
-			// service abort). Returning the context sentinel would make
-			// `errors.Is(err, context.Canceled)` a false positive for
-			// callers whose retry logic reads that as "the caller gave up".
+			// NOT context.Canceled: Athena cancels server-side for reasons
+			// unrelated to the caller's ctx (quota cutoff, admin Stop). The
+			// sentinel would false-positive a caller's `errors.Is` retry check.
 			reason := aws.ToString(statusResp.QueryExecution.Status.StateChangeReason)
 			if reason == "" {
 				reason = "no reason reported"
@@ -123,7 +114,7 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 			obs.Scope().Timer(DriverName + ".query.queryexecutionstatesucceeded").Record(time.Since(loopStart))
 			return statusResp.QueryExecution, nil
 		}
-		// Queued or Running — wait one poll interval, honoring ctx and the
+		// Queued or Running: wait one poll interval, honoring ctx and the
 		// per-statement timeout.
 		timer.Reset(pollInterval)
 		select {
@@ -150,12 +141,10 @@ func (c *Connection) awaitQueryCompletion(ctx context.Context, queryID, wgName, 
 	}
 }
 
-// stopQueryOnCancel is the cleanup path when the caller's context is
-// cancelled or the query is otherwise abandoned mid-flight. It issues
-// StopQueryExecution on a detached copy of ctx (cancellation of ctx does not
-// cancel the cleanup) bounded by a short timeout so it cannot hang for the
-// full SDK retry budget, optionally records the final cost, and updates
-// metrics/logs. Returns a non-nil error only if StopQueryExecution failed.
+// stopQueryOnCancel cleans up an abandoned/cancelled query: issues
+// StopQueryExecution on a detached, short-timeout ctx (so cleanup survives
+// ctx cancellation and can't hang for the full SDK retry budget), logs and
+// updates metrics. Returns non-nil only if StopQueryExecution failed.
 func (c *Connection) stopQueryOnCancel(ctx context.Context, queryID, wgName, query string, obs *DriverTracer, now time.Time) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 	defer cancel()
@@ -163,7 +152,7 @@ func (c *Connection) stopQueryOnCancel(ctx context.Context, queryID, wgName, que
 		QueryExecutionId: aws.String(queryID),
 	})
 	if err != nil {
-		obs.Log(ErrorLevel, "StopQueryExecution failed",
+		obs.LogCtx(cleanupCtx, ErrorLevel, "StopQueryExecution failed",
 			slog.String("workgroup", wgName),
 			slog.String("queryID", queryID),
 			slog.String("query", query))
@@ -178,6 +167,8 @@ func (c *Connection) stopQueryOnCancel(ctx context.Context, queryID, wgName, que
 	}
 	obs.Scope().Counter(DriverName + ".failure.querycontext.stopqueryexecution.succeeded").Inc(1)
 	obs.Scope().Timer(DriverName + ".query.StopQueryExecution").Record(time.Since(now))
-	obs.Log(ErrorLevel, "query canceled", slog.String("queryID", queryID))
+	// Cancelling via context is a normal way to abandon a query, not an
+	// error: logging the success path at ErrorLevel pollutes alerting.
+	obs.LogCtx(cleanupCtx, DebugLevel, "query canceled", slog.String("queryID", queryID))
 	return nil
 }

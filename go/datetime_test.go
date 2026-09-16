@@ -135,8 +135,8 @@ func TestDateTime_LocationCache(t *testing.T) {
 	assert.False(t, ok)
 }
 
-// TestDateTime_ScanTimeNumericOffset pins that a numeric UTC offset — what
-// Trino renders when the session zone is an offset, not an IANA name — parses
+// TestDateTime_ScanTimeNumericOffset pins that a numeric UTC offset (what
+// Trino renders when the session zone is an offset, not an IANA name) parses
 // to the correct instant instead of failing in time.LoadLocation.
 func TestDateTime_ScanTimeNumericOffset(t *testing.T) {
 	for _, tt := range []struct {
@@ -174,6 +174,23 @@ func TestDateTime_ShapeDispatchAllocs(t *testing.T) {
 			}
 		})
 		assert.Zero(t, n, "value %q allocated %v times", in, n)
+	}
+}
+
+// TestDateTime_ShapeDispatchFailsFast covers values that match the date-only
+// or time-only shape but are not real dates/times: the direct attempt fails
+// and no other layout could match, so the error is returned right away.
+func TestDateTime_ShapeDispatchFailsFast(t *testing.T) {
+	for _, in := range []string{"2024-13-45", "0000-00-00", "99:99:99", "ab:cd:ef"} {
+		r, e := scanTime(in)
+		assert.Error(t, e, "value %q", in)
+		assert.False(t, r.Valid, "value %q", in)
+		assert.Equal(t, ZeroDateTimeString, r.Time.String(), "value %q", in)
+
+		// One failed parse, not two: a second identical attempt in the
+		// sweep would roughly double this.
+		n := testing.AllocsPerRun(100, func() { _, _ = scanTime(in) })
+		assert.LessOrEqual(t, n, float64(4), "value %q allocated %v times", in, n)
 	}
 }
 

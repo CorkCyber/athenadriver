@@ -342,6 +342,22 @@ func TestConfig_ResultPollIntervalDefault(t *testing.T) {
 	assert.Equal(t, time.Second*time.Duration(PoolInterval), interval)
 }
 
+// TestConfig_ResultPollFractionalRoundtrip guards against a regression where
+// sub-second poll intervals were serialized with strconv.Itoa and truncated
+// to 0, silently falling back to the package default.
+func TestConfig_ResultPollFractionalRoundtrip(t *testing.T) {
+	for _, want := range []time.Duration{500 * time.Millisecond, 1500 * time.Millisecond, 2 * time.Second} {
+		src := NewNoOpsConfig()
+		_ = src.SetOutputBucket("s3://bucket/")
+		src.ResultPollInterval = want
+		src.ResultPollMaxInterval = want * 10
+		got, err := NewConfig(src.Stringify())
+		assert.Nil(t, err)
+		assert.Equal(t, want, got.ResultPollInterval)
+		assert.Equal(t, want*10, got.ResultPollMaxInterval)
+	}
+}
+
 // TestConfig_WGRemoteCreationRoundtrip guards against a regression where
 // toQuery skipped WGRemoteCreation=false, so NewConfig(cfg.Stringify())
 // flipped the field back to its default (true).

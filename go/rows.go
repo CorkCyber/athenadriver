@@ -107,14 +107,18 @@ var stringMeta = athenaTypeMeta{scanTypeString, "", parseString}
 // error: buildColMetas falls back to stringMeta so an unrecognized column
 // decodes as its raw string instead of failing the whole result set.
 var athenaTypes = map[string]athenaTypeMeta{
-	"tinyint":  {scanTypeInt8, 0, parseIntBits(8)},
-	"smallint": {scanTypeInt16, 0, parseIntBits(16)},
-	"integer":  {scanTypeInt32, 0, parseIntBits(32)},
-	"bigint":   {scanTypeInt64, 0, parseIntBits(64)},
+	// defaultVal must be the same Go type the parse func returns (and that
+	// ColumnTypeScanType advertises) — otherwise a missing cell and a present
+	// cell in the same column scan as different types, and untyped 0 boxes to
+	// plain int, which is not a valid driver.Value.
+	"tinyint":  {scanTypeInt8, int8(0), parseIntBits(8)},
+	"smallint": {scanTypeInt16, int16(0), parseIntBits(16)},
+	"integer":  {scanTypeInt32, int32(0), parseIntBits(32)},
+	"bigint":   {scanTypeInt64, int64(0), parseIntBits(64)},
 
-	"float":  {scanTypeFloat32, 0.0, parseFloatBits(32)},
-	"real":   {scanTypeFloat32, 0.0, parseFloatBits(32)},
-	"double": {scanTypeFloat64, 0.0, parseFloatBits(64)},
+	"float":  {scanTypeFloat32, float32(0), parseFloatBits(32)},
+	"real":   {scanTypeFloat32, float32(0), parseFloatBits(32)},
+	"double": {scanTypeFloat64, float64(0), parseFloatBits(64)},
 
 	"boolean": {scanTypeBool, false, parseBool},
 
@@ -494,7 +498,7 @@ func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.
 		if i < len(rdata) {
 			rawValue = rdata[i].VarCharValue
 		}
-		value, err := r.convertCell(columns[i], r.colMetas[i], rawValue, driverConfig)
+		value, err := r.convertCell(&columns[i], r.colMetas[i], rawValue, driverConfig)
 		if err != nil {
 			r.tracer.Log(ErrorLevel, "convertrow failed", slog.String("error", err.Error()))
 			r.tracer.Scope().Counter(DriverName + ".failure.convertrow").Inc(1)
@@ -515,7 +519,9 @@ func (r *Rows) convertRow(columns []athenatypes.ColumnInfo, rdata []athenatypes.
 // json is also undocumented above, but appears here https://docs.aws.amazon.com/athena/latest/ug/querying-JSON.html
 // The full list is here: https://prestodb.io/docs/0.172/language/types.html
 // Include ipaddress for forward compatibility.
-func (r *Rows) convertCell(columnInfo athenatypes.ColumnInfo, meta *athenaTypeMeta, rawValue *string, driverConfig *Config) (any, error) {
+// columnInfo is taken by pointer: it is ~88 bytes and this runs once per cell
+// of every row, but only two pointer fields are ever read.
+func (r *Rows) convertCell(columnInfo *athenatypes.ColumnInfo, meta *athenaTypeMeta, rawValue *string, driverConfig *Config) (any, error) {
 	// Name and Type are both optional in the SDK — resolve once, guarded.
 	colName := aws.ToString(columnInfo.Name)
 	typeName := aws.ToString(columnInfo.Type)

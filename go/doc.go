@@ -7,7 +7,7 @@
 //
 // It provides a hassle-free way of querying AWS Athena database with Go
 // standard library. It not only provides basic features of Athena Go SDK, but
-// addresses some of its limitation, improves and extends it.Except the basic
+// addresses some of its limitation, improves and extends it. Except the basic
 // features provided by Go database/sql like error handling, database pool
 // and reconnection, athenadriver supports the following features out of box:
 //
@@ -16,7 +16,6 @@
 //   - Full support of Athena Advanced Type for queries with Geospatial identifiers, ML and UDFs
 //   - Full support of ALL Athena Query Statements, including DDL, DML and UTILITY
 //   - Support newly added INSERT INTO...VALUES
-//   - Full support of Athena Basic Data Types
 //   - Athena workgroup and tagging support including remote workgroup creation
 //   - Go sql's Prepared statement support
 //   - Go sql's DB.Exec() and db.ExecContext() support

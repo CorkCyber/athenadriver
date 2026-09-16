@@ -111,12 +111,20 @@ func (c *DriverTracer) SetScope(scope Scope) {
 	c.scope = scope
 }
 
-// Log fires a structured log record at the given slog level. Panic / fatal
-// levels intentionally have no analogue; the driver never wants a DB error
-// to terminate the host process.
+// Log fires a structured log record at the given slog level with a
+// background context. Panic / fatal levels intentionally have no analogue;
+// the driver never wants a DB error to terminate the host process. Prefer
+// LogCtx where a caller context is in hand.
 func (c *DriverTracer) Log(lvl slog.Level, msg string, attrs ...slog.Attr) {
+	c.LogCtx(context.Background(), lvl, msg, attrs...)
+}
+
+// LogCtx is Log with a caller-supplied context, so handlers that read trace /
+// span IDs off the context (e.g. an OTel bridge) can correlate driver log
+// records with the surrounding request.
+func (c *DriverTracer) LogCtx(ctx context.Context, lvl slog.Level, msg string, attrs ...slog.Attr) {
 	if !c.config.LoggingEnabled {
 		return
 	}
-	c.logger.LogAttrs(context.Background(), lvl, msg, attrs...)
+	c.logger.LogAttrs(ctx, lvl, msg, attrs...)
 }

@@ -45,7 +45,7 @@ func (c *Connection) ExecContext(ctx context.Context, query string, namedArgs []
 		return nil, driver.ErrBadConn
 	}
 	if len(namedArgs) > 0 {
-		c.tracer.Scope().Counter(DriverName + ".execcontext").Inc(1)
+		c.tracer.Scope().Counter(DriverName + ".prepared.execcontext").Inc(1)
 	}
 	rows, err := c.QueryContext(ctx, query, namedArgs)
 	if err != nil {
@@ -116,7 +116,6 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 			return nil, errors.New("writing to Athena database is disallowed in read-only mode")
 		}
 	}
-	now := time.Now()
 	args := namedValueToValue(namedArgs)
 	// Athena receives the placeholder-form query plus ExecutionParameters —
 	// but only for statement shapes the API supports (SELECT / INSERT /
@@ -144,6 +143,7 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 	if !isQueryValid(query) {
 		return nil, ErrInvalidQuery
 	}
+	now := time.Now()
 	wg, err := c.resolveWorkgroup(ctx)
 	if err != nil {
 		return nil, err
@@ -273,7 +273,7 @@ func (c *Connection) QueryContext(ctx context.Context, query string, namedArgs [
 // and reports the pseudo-command name plus the remainder of the query
 // string. Returns immediate != nil for pseudo-commands whose entire effect
 // is to produce a one-shot result row (currently only PCGetDriverVersion).
-// Returns (`"`, query, nil, nil) when the query has no `pc:` prefix.
+// Returns ("", query, nil, nil) when the query has no `pc:` prefix.
 func (c *Connection) parsePseudoCommand(ctx context.Context, query string) (cmd, remaining string, immediate driver.Rows, err error) {
 	if !strings.HasPrefix(query, "pc:") {
 		return "", query, nil, nil
@@ -284,7 +284,7 @@ func (c *Connection) parsePseudoCommand(ctx context.Context, query string) (cmd,
 			return pc, strings.Trim(body[len(pc):], " "), nil, nil
 		}
 	}
-	if strings.HasPrefix(body, PCGetDriverVersion) {
+	if body == PCGetDriverVersion {
 		rows, err := c.getHeaderlessSingleRowResultPage(ctx, DriverVersion())
 		return PCGetDriverVersion, "", rows, err
 	}

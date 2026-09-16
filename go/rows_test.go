@@ -38,7 +38,7 @@ func (r *Rows) athenaTypeToGoType(columnInfo athenatypes.ColumnInfo, rawValue *s
 			meta = &m
 		}
 	}
-	return r.convertCell(columnInfo, meta, rawValue, driverConfig)
+	return r.convertCell(&columnInfo, meta, rawValue, driverConfig)
 }
 
 func TestOnePageSuccess(t *testing.T) {
@@ -240,28 +240,33 @@ func TestRows_MissingAsDefaultValue(t *testing.T) {
 	check := func(typeName string, expected any) {
 		t.Helper()
 		meta := athenaTypes[typeName]
-		v, err := r.convertCell(newColumnInfo("c", typeName), &meta, nil, testConf)
+		ci := newColumnInfo("c", typeName)
+		v, err := r.convertCell(&ci, &meta, nil, testConf)
 		assert.NoError(t, err)
 		assert.Equal(t, expected, v)
 	}
-	for _, v := range []string{"tinyint", "smallint", "integer", "bigint"} {
-		check(v, 0)
-	}
+	// Typed zero values: must match both the parse func's return type and
+	// ColumnTypeScanType, so a missing cell scans like a present one.
+	check("tinyint", int8(0))
+	check("smallint", int16(0))
+	check("integer", int32(0))
+	check("bigint", int64(0))
 	for _, v := range []string{"json", "char", "varchar", "varbinary", "row", "string", "binary",
 		"struct", "interval year to month", "interval day to second", "decimal",
 		"ipaddress", "array", "map", "unknown"} {
 		check(v, "")
 	}
-	for _, v := range []string{"float", "double", "real"} {
-		check(v, 0.0)
-	}
+	check("float", float32(0))
+	check("real", float32(0))
+	check("double", float64(0))
 	for _, v := range []string{"date", "time", "time with time zone", "timestamp", "timestamp with time zone"} {
 		check(v, time.Time{})
 	}
 	check("boolean", false)
 
 	// unknown type: no meta resolved, falls back to the empty string.
-	v, err := r.convertCell(newColumnInfo("c", "XXX"), nil, nil, testConf)
+	ciX := newColumnInfo("c", "XXX")
+	v, err := r.convertCell(&ciX, nil, nil, testConf)
 	assert.NoError(t, err)
 	assert.Equal(t, "", v)
 }
@@ -428,7 +433,7 @@ func TestRows_AthenaTypeToGoType(t *testing.T) {
 	testConf.MissingAsNil = false
 	g, e = r.athenaTypeToGoType(c, nil, testConf)
 	assert.Nil(t, e)
-	assert.Equal(t, 0, g)
+	assert.Equal(t, int32(0), g)
 
 	testConf.MissingAsEmptyString = false
 	testConf.MissingAsDefault = false
@@ -724,4 +729,27 @@ func TestRows_DuplicateNextTokenTerminates(t *testing.T) {
 		t.Fatal("fetchNextPage did not terminate on a repeated NextToken")
 	}
 	assert.LessOrEqual(t, m.callCount("GetQueryResults"), 3)
+}
+
+// TestRows_MissingAsDefaultMatchesScanType pins the invariant that a
+// MissingAsDefault value scans as the same Go type ColumnTypeScanType
+// promises (and that a present value parses to).
+func TestRows_MissingAsDefaultMatchesScanType(t *testing.T) {
+	conf := NewNoOpsConfig()
+	conf.MissingAsDefault = true
+	conf.MissingAsNil = false
+	conf.MissingAsEmptyString = false
+
+	for _, ty := range []string{"tinyint", "smallint", "integer", "bigint",
+		"float", "real", "double", "boolean", "timestamp", "varchar"} {
+		cols := []athenatypes.ColumnInfo{colInfo("c", ty)}
+		r := newRowsWithMetadata("q", nil, cols)
+		r.config = conf
+		r.tracer = NewObservability(conf, nil, nil)
+
+		dest := make([]driver.Value, 1)
+		// no datums -> missing cell -> default value path
+		assert.NoError(t, r.convertRow(cols, nil, dest, conf), ty)
+		assert.Equal(t, r.ColumnTypeScanType(0), reflect.TypeOf(dest[0]), ty)
+	}
 }

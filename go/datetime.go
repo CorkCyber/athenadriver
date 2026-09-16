@@ -17,11 +17,11 @@ type AthenaTime struct {
 	Valid bool
 }
 
-// timeLayouts is ordered most-common-first: the first match wins and every
+// timeLayouts is ordered most-common-first: the first match wins, and every
 // failed attempt allocates a *time.ParseError. No fractional-second layouts
-// are needed — time.Parse accepts a fractional suffix after the seconds
-// field even when the layout does not mention one — so these three cover
-// every Athena DATE/TIME/TIMESTAMP shape at any fraction width.
+// are needed since time.Parse accepts a fractional suffix after the seconds
+// field even when the layout omits one, so these three cover every Athena
+// DATE/TIME/TIMESTAMP shape at any fraction width.
 var timeLayouts = []string{
 	"2006-01-02 15:04:05",
 	"2006-01-02",
@@ -51,20 +51,20 @@ func parseAthenaTime(v string) (AthenaTime, error) {
 func parseAthenaTimeIn(v string, loc *time.Location) (AthenaTime, error) {
 	var t time.Time
 	var err error
-	// Shape dispatch: the sweep below is ordered timestamp-first, so a
-	// date-only or time-only value would pay one or two failed parses (each
-	// allocating a *time.ParseError) before matching. A few byte comparisons
-	// pick the right layout up front; anything unrecognized — or a direct
-	// attempt that fails — still falls through to the full sweep.
+	// Shape dispatch: skip the timestamp-first sweep below (costly failed
+	// parses for date-only/time-only values) via a few byte comparisons.
+	// Unrecognized shapes fall through to the full sweep.
 	switch {
 	case len(v) == 10 && v[4] == '-' && v[7] == '-':
-		if t, err = time.ParseInLocation(timeLayouts[1], v, loc); err == nil {
-			return AthenaTime{Valid: true, Time: t}, nil
+		if t, err = time.ParseInLocation(timeLayouts[1], v, loc); err != nil {
+			return AthenaTime{}, err
 		}
+		return AthenaTime{Valid: true, Time: t}, nil
 	case len(v) >= 8 && v[2] == ':' && v[5] == ':':
-		if t, err = time.ParseInLocation(timeLayouts[2], v, loc); err == nil {
-			return AthenaTime{Valid: true, Time: t}, nil
+		if t, err = time.ParseInLocation(timeLayouts[2], v, loc); err != nil {
+			return AthenaTime{}, err
 		}
+		return AthenaTime{Valid: true, Time: t}, nil
 	}
 	for _, layout := range timeLayouts {
 		t, err = time.ParseInLocation(layout, v, loc)
@@ -95,7 +95,7 @@ func parseAthenaTimeWithLocation(v string) (AthenaTime, error) {
 // loadZone resolves a trailing zone token. Trino renders `timestamp with time
 // zone` with a numeric UTC offset ("-08:00", "+05:30") whenever the session
 // zone or an AT TIME ZONE expression is an offset rather than an IANA name,
-// and time.LoadLocation only knows IANA names — so handle that shape here.
+// and time.LoadLocation only knows IANA names, so handle that shape here.
 func loadZone(s string) (*time.Location, error) {
 	if len(s) == 6 && (s[0] == '+' || s[0] == '-') && s[3] == ':' &&
 		isDigit(s[1]) && isDigit(s[2]) && isDigit(s[4]) && isDigit(s[5]) {

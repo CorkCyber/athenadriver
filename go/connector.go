@@ -96,6 +96,12 @@ func NewConnector(cfg *Config) *SQLConnector {
 // WithAWSConfig injects a caller-built aws.Config. When set, Connect uses
 // it verbatim instead of synthesizing one from DSN keys. Returns the same
 // connector for chaining.
+//
+// Must be called before the connector's first Connect — i.e. immediately
+// after NewConnector, while the connector is not yet in use. The Athena
+// client is built once and cached for the connector's lifetime, so a call
+// after the first successful Connect has no effect and races any concurrent
+// Connect.
 func (c *SQLConnector) WithAWSConfig(awsCfg aws.Config) *SQLConnector {
 	c.awsConfig = &awsCfg
 	return c

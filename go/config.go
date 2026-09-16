@@ -165,9 +165,8 @@ func NewConfig(dsn string) (*Config, error) {
 		return nil, ErrConfigInvalidConfig
 	}
 	c := &Config{
-		bucketHost:     u.Host,
-		bucketPath:     strings.TrimLeft(u.Path, "/"),
-		LoggingEnabled: true,
+		bucketHost: u.Host,
+		bucketPath: strings.TrimLeft(u.Path, "/"),
 	}
 	if u.User != nil {
 		c.User = u.User.Username()
@@ -223,11 +222,11 @@ func (c *Config) fromQuery(q url.Values) error {
 	}
 
 	if v := q.Get("resultPollIntervalSeconds"); v != "" {
-		n, err := strconv.Atoi(v)
+		n, err := strconv.ParseFloat(v, 64)
 		if err != nil {
 			return err
 		}
-		c.ResultPollInterval = time.Duration(n) * time.Second
+		c.ResultPollInterval = time.Duration(n * float64(time.Second))
 	}
 	if v := q.Get("resultPollBackoffMultiplier"); v != "" {
 		n, err := strconv.ParseFloat(v, 64)
@@ -237,11 +236,11 @@ func (c *Config) fromQuery(q url.Values) error {
 		c.ResultPollBackoffMultiplier = n
 	}
 	if v := q.Get("resultPollMaxIntervalSeconds"); v != "" {
-		n, err := strconv.Atoi(v)
+		n, err := strconv.ParseFloat(v, 64)
 		if err != nil {
 			return err
 		}
-		c.ResultPollMaxInterval = time.Duration(n) * time.Second
+		c.ResultPollMaxInterval = time.Duration(n * float64(time.Second))
 	}
 
 	// missingAsEmptyString, WGRemoteCreation, LoggingEnabled and
@@ -396,7 +395,7 @@ func (c *Config) toQuery() url.Values {
 	}
 
 	if c.ResultPollInterval > 0 {
-		q.Set("resultPollIntervalSeconds", strconv.Itoa(int(c.ResultPollInterval.Seconds())))
+		q.Set("resultPollIntervalSeconds", strconv.FormatFloat(c.ResultPollInterval.Seconds(), 'f', -1, 64))
 	}
 	// > 0, not > 1: an explicit 1.0 means "disable backoff" (see
 	// PollBackoffMultiplier) and must survive the DSN round-trip rather
@@ -405,7 +404,7 @@ func (c *Config) toQuery() url.Values {
 		q.Set("resultPollBackoffMultiplier", strconv.FormatFloat(c.ResultPollBackoffMultiplier, 'f', -1, 64))
 	}
 	if c.ResultPollMaxInterval > 0 {
-		q.Set("resultPollMaxIntervalSeconds", strconv.Itoa(int(c.ResultPollMaxInterval.Seconds())))
+		q.Set("resultPollMaxIntervalSeconds", strconv.FormatFloat(c.ResultPollMaxInterval.Seconds(), 'f', -1, 64))
 	}
 
 	// missingAsEmptyString defaults to true; emit only when explicitly

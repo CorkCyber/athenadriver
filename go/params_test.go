@@ -5,6 +5,7 @@ package athenadriver
 import (
 	"database/sql/driver"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -55,4 +56,46 @@ func TestInterpolateParams_QuotedIdentifiersAndComments(t *testing.T) {
 	// Argument count must match the REAL placeholder count, not the '?' count.
 	_, err = c.interpolateParams(`SELECT "weird?column" WHERE a = ?`, []driver.Value{int64(7), int64(8)})
 	assert.Equal(t, ErrInvalidQuery, err)
+}
+
+// TestRenderParity pins the shared appendSQLValue rendering: interpolateParams
+// and buildExecutionParams must emit the same literal for the same argument.
+func TestRenderParity(t *testing.T) {
+	ts := time.Date(2024, 7, 1, 2, 3, 4, 0, time.UTC)
+	tsMicro := time.Date(2024, 7, 1, 2, 3, 4, 123456000, time.UTC)
+	cases := []struct {
+		name string
+		arg  driver.Value
+		want string
+	}{
+		{"nil", nil, "NULL"},
+		{"int64", int64(-10), "-10"},
+		{"uint64", uint64(42), "42"},
+		{"float64", 1.23, "1.23"},
+		{"bool", true, "true"},
+		{"time zero", time.Time{}, "NULL"},
+		{"time", ts, "'2024-07-01 02:03:04'"},
+		{"time micro", tsMicro, "'2024-07-01 02:03:04.123456'"},
+		{"bytes", []byte("a'b"), "'a''b'"},
+		{"string", "it's a \"test\"", "'it''s a \"test\"'"},
+		{"raw", Raw("CURRENT_DATE"), "CURRENT_DATE"},
+	}
+	c := createTestConnection(t)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			params, err := c.buildExecutionParams([]driver.Value{tc.arg})
+			assert.NoError(t, err)
+			assert.Equal(t, []string{tc.want}, params)
+
+			q, err := c.interpolateParams("SELECT ?", []driver.Value{tc.arg})
+			assert.NoError(t, err)
+			assert.Equal(t, "SELECT "+tc.want, q)
+		})
+	}
+
+	// Unknown types error out of both paths.
+	_, err := c.buildExecutionParams([]driver.Value{struct{}{}})
+	assert.Equal(t, ErrQueryUnknownType, err)
+	_, err = c.interpolateParams("SELECT ?", []driver.Value{struct{}{}})
+	assert.Equal(t, ErrQueryUnknownType, err)
 }

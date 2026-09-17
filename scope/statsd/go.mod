@@ -25,4 +25,6 @@ require (
 	github.com/aws/smithy-go v1.28.1 // indirect
 )
 
+// v2.0.0 above has no published tag yet; this resolves it against the
+// in-repo driver so the module builds standalone outside the workspace.
 replace github.com/CorkCyber/athenadriver/v2 => ../../

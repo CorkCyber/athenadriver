@@ -28,4 +28,6 @@ require (
 	go.uber.org/atomic v1.11.0 // indirect
 )
 
+// v2.0.0 above has no published tag yet; this resolves it against the
+// in-repo driver so the module builds standalone outside the workspace.
 replace github.com/CorkCyber/athenadriver/v2 => ../../

@@ -1,0 +1,15 @@
+version: 2
+updates:
+  # go.work lives at the repo root. Dependabot discovers every module
+  # listed in its `use` block (driver, athenareader, examples, and the
+  # three scope/* adapters), runs `go work sync`, then `go mod tidy` in
+  # each affected module.
+  - package-ecosystem: "gomod"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

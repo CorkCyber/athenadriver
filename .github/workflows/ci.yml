@@ -37,6 +37,14 @@ jobs:
             echo "::error::gofmt -s found unformatted files; run 'gofmt -s -w'"
             exit 1
           fi
+      - name: SPDX headers
+        run: |
+          missing="$(grep -rL 'SPDX-License-Identifier' --include='*.go' .)"
+          if [ -n "$missing" ]; then
+            echo "$missing"
+            echo "::error::files above are missing the SPDX-License-Identifier header"
+            exit 1
+          fi
       - name: examples build
         run: go build ./examples/...
       - name: go test

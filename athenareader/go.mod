@@ -2,6 +2,12 @@ module github.com/CorkCyber/athenadriver/athenareader
 
 go 1.26
 
+// v2.0.0 above has no published tag yet; this resolves it against the
+// in-repo driver so the module builds standalone outside the workspace.
+// `go mod tidy` ignores go.work by design, so this is load-bearing even
+// though go.work also lists this module.
+replace github.com/CorkCyber/athenadriver/v2 => ../
+
 require (
 	github.com/CorkCyber/athenadriver/v2 v2.0.0
 	github.com/jedib0t/go-pretty/v6 v6.8.3

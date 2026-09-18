@@ -16,7 +16,7 @@ cover:
 # lint runs vet + gofmt -s. golint (golang.org/x/lint) was archived in 2021;
 # upgrade to staticcheck if a richer linter is needed.
 lint: vet
-	@out="$$(gofmt -d -s ./go ./examples ./scope)"; \
+	@out="$$(gofmt -d -s ./go ./examples ./scope ./athenareader)"; \
 	if [ -n "$$out" ]; then echo "$$out"; echo "gofmt -s found unformatted files"; exit 1; fi
 
 athenareader:

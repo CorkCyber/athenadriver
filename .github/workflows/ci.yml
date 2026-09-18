@@ -31,7 +31,7 @@ jobs:
         run: go vet ./go/... ./examples/...
       - name: gofmt
         run: |
-          fmt_out="$(gofmt -d -s ./go ./examples ./scope)"
+          fmt_out="$(gofmt -d -s ./go ./examples ./scope ./athenareader)"
           if [ -n "$fmt_out" ]; then
             echo "$fmt_out"
             echo "::error::gofmt -s found unformatted files; run 'gofmt -s -w'"

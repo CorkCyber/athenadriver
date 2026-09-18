@@ -22,9 +22,19 @@ name: release-please
 #     Do NOT pre-push tags to match those versions. That recreates
 #     the exact "manifest claims a version with no matching tag" bug
 #     this setup was fixed to avoid. Let release-please's first PR
-#     create the tags itself. Then remove each package's "release-as"
-#     once its first release has shipped, or every future bump keeps
-#     pinning to that same version.
+#     create the tags itself.
+#
+#     Once a package's first release has shipped, remove its
+#     "release-as" before the next conventional commit touching that
+#     package lands on the default branch, or release-please just
+#     re-proposes the same already-tagged version and quietly skips
+#     creating the release on merge (no error, no release.yml run). If
+#     a PR pinned to the old version is already open when you do this,
+#     close it and delete its release-please--branches--... branch too;
+#     editing the config alone won't retitle a PR already in flight.
+#     A one-off version pin is safer as a `Release-As: X.Y.Z` commit
+#     footer instead, since a footer expires after one release and
+#     can't be forgotten.
 #
 #   * A driver major bump (3.0.0) requires a manual module-path change
 #     to /v3 first. release-please bumps numbers, not import paths.
@@ -36,8 +46,11 @@ name: release-please
 #
 #   * PRs opened with the default GITHUB_TOKEN do not trigger the CI
 #     workflow. Swap the token for a PAT / GitHub App token if CI
-#     must run on release PRs. Until then, re-run CI by pushing to
-#     the PR, or rely on branch protection running it at merge time.
+#     must run on release PRs. Until then, re-run CI manually by
+#     pushing an empty commit to the PR before merging it, or add a
+#     branch protection rule requiring ci.yml's jobs to pass, which
+#     does run them (branch protection isn't configured yet on this
+#     repo; nothing enforces this today).
 
 on:
   push:

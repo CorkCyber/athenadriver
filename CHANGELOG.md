@@ -4,6 +4,54 @@ All notable changes to this driver are documented here. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## 2.0.0 (2026-09-18)
+
+
+### ⚠ BREAKING CHANGES
+
+* go 1.26 is now the minimum supported Go version.
+* fix stale/incorrect documentation across README, CHANGELOG, examples
+* go 1.24 is now the declared minimum across every module.
+* Config.String() now returns a masked form instead of a connectable DSN. Call Stringify() for the raw DSN.
+* string/[]byte arguments are now auto-quoted. Code calling FormatString()/FormatBytes() before passing to Query/Exec will now double-quote. See README's Parameterized Queries section.
+* a tally.Scope injected via MetricsKey no longer type-asserts. Bridge through scope/otel, scope/tally, scope/statsd, or a small custom adapter. Import path changes to github.com/CorkCyber/athenadriver/v2/go.
+* Config is a typed struct now. Old GetX/SetX accessors for non-validated fields are gone; use direct field access. See CHANGELOG.md's v2.0.0 migration guide.
+
+### Features
+
+* add OTel-compatible tracing spans (Tracer/Span, TracerKey) ([efc4dcc](https://github.com/CorkCyber/athenadriver/commit/efc4dcc960f24f69a61e333eafa666b330ad23ac))
+* decouple metrics from tally, adopt /v2 module path ([a662404](https://github.com/CorkCyber/athenadriver/commit/a662404d579618cefc4b53897ef31fa6ee53eb15))
+* expose query-execution metadata (Rows accessors + timing attributes) ([6740672](https://github.com/CorkCyber/athenadriver/commit/67406728438eb607196c1b43eec8f76d6f6e029f))
+* initial v2 rewrite scaffolding ([ed36067](https://github.com/CorkCyber/athenadriver/commit/ed3606771dc3062e38a9d786c98a3c5ed7abe98f))
+* rewrite Config as a typed struct (v2.0.0) ([d50dcf8](https://github.com/CorkCyber/athenadriver/commit/d50dcf8745df25af186fdcb98cbbe3d87586e165))
+
+
+### Bug Fixes
+
+* CI/CD supply-chain hardening ([5437b92](https://github.com/CorkCyber/athenadriver/commit/5437b924aa4abee9c773038bfbdedcd62813a5f8))
+* **ci:** enforce driver-first release ordering instead of just documenting it ([3961961](https://github.com/CorkCyber/athenadriver/commit/39619619b21593dd969b0cc4827749eaf790e5c0))
+* **ci:** validate releases against the real published driver, not go.work ([30f60e3](https://github.com/CorkCyber/athenadriver/commit/30f60e3bdef87cc0d706f3ae7c4852e52ebc668f))
+* correctness round: credentials, paginator, date/time, cancellation, escaping ([2f0f196](https://github.com/CorkCyber/athenadriver/commit/2f0f196fe8372a88704d7bf86f252875468bbc83))
+* correctness/perf round: scanning, cancellation, credentials, caching ([438281e](https://github.com/CorkCyber/athenadriver/commit/438281ece74eea43cf49c185640ec6c0d057eddd))
+* **docs:** repair broken /v2 badge links and dead example links ([760deca](https://github.com/CorkCyber/athenadriver/commit/760deca864ef4d6176632d5ded607340917360ef))
+* release-please manifest claimed versions with no matching tags ([56b67fb](https://github.com/CorkCyber/athenadriver/commit/56b67fbc87988bc18099ed1905ad397bfb701c6a))
+* **release-please:** stop the root package claiming every commit ([0962c4c](https://github.com/CorkCyber/athenadriver/commit/0962c4c01f2b5af74c5ba4f101c44ae8787e48ed))
+* release/build pipeline assumed the wrong default branch ([781262a](https://github.com/CorkCyber/athenadriver/commit/781262a69fc9c50812ff2f28b1d918da91fcac02))
+* SQL injection in parameterized queries, correct Trino escaping ([ad3030c](https://github.com/CorkCyber/athenadriver/commit/ad3030c744e7d7eb5e4c2addfa8f4ee198165cea))
+* v2 credential resolution parity, credential leak, mask casing ([5d29977](https://github.com/CorkCyber/athenadriver/commit/5d29977180ae864b2895d02f9da5134f1a5309cd))
+* workgroup log uses wrong name, Close() data race ([2dcfabf](https://github.com/CorkCyber/athenadriver/commit/2dcfabf3f4f401c3c12bc08720a3e9ea8fa99a1d))
+
+
+### Documentation
+
+* fix stale/incorrect documentation across README, CHANGELOG, examples ([4ea2bc9](https://github.com/CorkCyber/athenadriver/commit/4ea2bc9b6ef03ae44463789d36737c9a65122e74))
+
+
+### Miscellaneous Chores
+
+* bump AWS SDK v2 + go.uber.org/config across all modules ([fd76f01](https://github.com/CorkCyber/athenadriver/commit/fd76f0143b53052d5f4608fc8a6f616d54b40a29))
+* bump go floor to 1.26, modernize accordingly ([a21f988](https://github.com/CorkCyber/athenadriver/commit/a21f9886953d2cc400067e9ebab0125b54bc8384))
+
 ## [Unreleased]
 
 _Nothing yet. v2.0.0 is the current target; see below._

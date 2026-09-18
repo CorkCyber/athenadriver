@@ -1376,8 +1376,8 @@ follow [SemVer](http://semver.org/) once tagged.
 
 ## Contributing
 
-PRs and issues welcome. See [resources/CONTRIBUTING.md](resources/CONTRIBUTING.md)
-and the [code of conduct](resources/CODE_OF_CONDUCT.md). Contributions
+PRs and issues welcome. See [CONTRIBUTING.md](CONTRIBUTING.md)
+and the [code of conduct](CODE_OF_CONDUCT.md). Contributions
 that originally targeted `uber/athenadriver` or `grafana/athenadriver`
 are good candidates to re-open against this repo.
 

@@ -1,6 +1,6 @@
 module github.com/CorkCyber/athenadriver/athenareader
 
-go 1.26
+go 1.26.0
 
 // v2.0.0 above has no published tag yet; this resolves it against the
 // in-repo driver so the module builds standalone outside the workspace.
@@ -32,6 +32,6 @@ require (
 	github.com/aws/smithy-go v1.28.1 // indirect
 	github.com/mattn/go-runewidth v0.0.16 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
-	golang.org/x/sys v0.30.0 // indirect
+	golang.org/x/sys v0.48.0 // indirect
 	golang.org/x/text v0.22.0 // indirect
 )

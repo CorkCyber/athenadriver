@@ -1,17 +1,24 @@
 name: Release
 
-# Runs only when a GitHub Release is published. The release's tag decides
-# which module gets validated / packaged:
+# Runs only when a GitHub Release is published.
+# The release's tag decides which module gets validated / packaged:
 #
 #   v*               driver  (module github.com/CorkCyber/athenadriver/v2)
-#   athenareader/v*  CLI     (cross-compiled binaries attached to the release)
-#   scope/otel/v*    metrics adapters (validated only — the tag alone
-#   scope/tally/v*   publishes a Go module; there is nothing to attach)
-#   scope/statsd/v*
+#   athenareader/v*  CLI (cross-compiled binaries attached to the release)
+#   scope/otel/v*    metrics adapters, validated only.
+#   scope/tally/v*   the tag alone publishes a Go module,
+#   scope/statsd/v*  there's nothing to attach.
 #
-# Tagging stays manual on purpose: the driver tag must exist on the proxy
-# before the sub-module tags (their go.mod files require athenadriver/v2),
-# so the ordering is a human decision, not a pipeline.
+# Tagging stays manual on purpose.
+# The driver tag has to exist on the proxy before the sub-module tags,
+# since their go.mod files require athenadriver/v2. Ordering is a human
+# decision, not something the pipeline picks for you.
+#
+# The athenareader and adapters jobs do check for it, though.
+# They query proxy.golang.org directly (GOWORK=off, bypassing this
+# repo's go.work) for the exact driver version their go.mod requires.
+# If it isn't published yet, the job fails loudly instead of quietly
+# building against the local workspace copy and looking fine.
 
 on:
   release:
@@ -54,6 +61,14 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - name: driver release must exist first
+        run: |
+          ver="$(grep -m1 'github.com/CorkCyber/athenadriver/v2 ' go.mod | awk '{print $2}')"
+          if ! GOWORK=off GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org \
+               go list -m "github.com/CorkCyber/athenadriver/v2@${ver}" >/dev/null 2>&1; then
+            echo "::error::driver ${ver} isn't published on the module proxy yet; release the driver (tag ${ver}) before this package"
+            exit 1
+          fi
       - name: go test
         run: go test -race ./...
       - name: cross-compile
@@ -86,6 +101,15 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - name: driver release must exist first
+        run: |
+          moddir="$(dirname "${GITHUB_REF_NAME}")" # scope/otel/v0.1.0 -> scope/otel
+          ver="$(grep -m1 'github.com/CorkCyber/athenadriver/v2 ' "$moddir/go.mod" | awk '{print $2}')"
+          if ! GOWORK=off GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org \
+               go list -m "github.com/CorkCyber/athenadriver/v2@${ver}" >/dev/null 2>&1; then
+            echo "::error::driver ${ver} isn't published on the module proxy yet; release the driver (tag ${ver}) before this package"
+            exit 1
+          fi
       - name: go test
         run: |
           moddir="$(dirname "${GITHUB_REF_NAME}")" # scope/otel/v0.1.0 -> scope/otel

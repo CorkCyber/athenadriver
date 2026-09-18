@@ -70,6 +70,9 @@ advanced features like Athena workgroup and tagging creation, driver read-only m
 
 The PDF version of AthenaDriver document is available at [ :scroll: ](resources/athenadriver.pdf)
 
+For Athena quirks and undocumented behavior we ran into while building this
+driver, see [resources/UndocumentedAthena.md](resources/UndocumentedAthena.md).
+
 ## v2.0.0 Migration Guide
 
 Ten breaking changes, batched into one release.

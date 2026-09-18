@@ -19,7 +19,7 @@ jobs:
         # 1.26 is both the declared floor in go.mod and the latest release.
         go: ["1.26"]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-go@v7
@@ -60,7 +60,7 @@ jobs:
     name: athenareader CLI
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-go@v7
@@ -82,7 +82,7 @@ jobs:
     name: examples
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-go@v7
@@ -108,7 +108,7 @@ jobs:
       matrix:
         adapter: [otel, tally, statsd]
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: actions/setup-go@v7

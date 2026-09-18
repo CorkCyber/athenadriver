@@ -11,7 +11,13 @@ and help database users release the full power of AWS Athena.
 In Athena document website, there is a web page [Data Types Supported by Amazon Athena](https://docs.aws.amazon.com/athena/latest/ug/data-types.html). 
 But according to our testing, what Athena supports are far more than that.
 
-What Amazon did tell you is the following values are also valid and fully supported:
+What Amazon didn't tell you is the following values are also valid and fully supported:
+
+> **Update:** all the types below are now listed on that
+> same AWS page (Amazon has also since added `UUID`, `IPADDRESS`, and
+> a handful of approximate-aggregation types, not covered here). What's
+> still useful in this section is what Go value **athenadriver**
+> actually returns for each one, which the AWS docs still don't cover.
 
 `json`, `varbinary`, `row`, `interval year to month`,  `interval day to second`,  `time`,  `time with time zone`,  `timestamp with time zone`
 
@@ -109,11 +115,13 @@ For more sample code, please check [util_desc_table.go](https://github.com/CorkC
 
 - `awsathendriver`'s Solution:
 
-`athenadriver` fixes this issue by splitting `Rows[0].Data[0]` string with tab, and replace the original row with a new row which has the same number of data with columns.
+`athenadriver` fixes this issue by splitting the row's string with tab, and replacing it with a new row that has the same number of data as columns.
+
+> **Update:** this isn't really tied to `DESC`/`SHOW` specifically, it happens whenever a page's `ColumnInfo` has more columns than a row has fields, and that row only has 1 field to begin with. It's also not just `Rows[0]` that gets fixed, every row on the page gets the same tab-split treatment, with whitespace trimmed off each piece. If the split doesn't land on exactly the right number of fields, that row is left alone rather than guessed at.
 
 ## `ColumnInfo` has cloumns but `Rows` are empty
 
-> ![](pin.png)**Affected Statements: [`CTAS`](https://docs.aws.amazon.com/athena/latest/ug/ctas.html), [CVAS](https://docs.aws.amazon.com/athena/latest/ug/views.html)\footnote{Create View as Select}, INSERT INTO**
+> ![](pin.png)**Affected Statements: [`CTAS`](https://docs.aws.amazon.com/athena/latest/ug/ctas.html), INSERT INTO**
 
 Sample Query:
 
@@ -136,10 +144,14 @@ In the above [`CTAS`](https://docs.aws.amazon.com/athena/latest/ug/ctas.html) st
 
 - `awsathendriver`'s Solution:
 
-Because this issue happens only in statements [`CTAS`](https://docs.aws.amazon.com/athena/latest/ug/ctas.html), [`CVAS`](https://docs.aws.amazon.com/athena/latest/ug/views.html), and `INSERT INTO
-`, where `UpdateCount` is always valid and is the only meaningful information
- returned from Athena, `athenadriver` sets `UpdateCount` as the value of
-  the returned row.
+Because this issue happens only in statements [`CTAS`](https://docs.aws.amazon.com/athena/latest/ug/ctas.html) and `INSERT INTO`, where `UpdateCount` is always valid and is the only meaningful information returned from Athena, `athenadriver` sets `UpdateCount` as the value of the returned row.
+
+> **Update:** `CVAS` was also listed here originally; that
+> was wrong. The driver doesn't special-case any statement type, it
+> checks whether Athena named the lone result column `rows` and
+> whether `UpdateCount` came back greater than 0. A `CREATE VIEW`/`CVAS`
+> never gets Athena to name a column `rows` in the first place, so it
+> never hits this path.
 
 For more sample code, please check [ddl_ctas.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/ddl_ctas/main.go), [ddl_cvas.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/ddl_cvas/main.go), [dml_insert_into_select.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_insert_into_select/main.go) and [dml_insert_into_values.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_insert_into_values/main.go).
 
@@ -150,10 +162,25 @@ For more sample code, please check [ddl_ctas.go](https://github.com/CorkCyber/at
 
 The resultset metadata includes both column and row details. If and Only if the statement is a select statement and the result set page is the first one, the first row is actually the column name strings, aka row header. Understanding this is very important to support all query statements, because when it is a SELECE statement, in order to make database driver behave consistently, we should skip the first row for the first page.
 
+> **Update:** the actual check isn't "only if the statement
+> is a select statement" — it's a content comparison. On the first
+> page only, athenadriver compares the first row's values against
+> `ColumnInfo`'s column names, and skips that row only if they match up
+> exactly (same count, same order, no missing values). In practice, a
+> non-SELECT page whose first row happens to echo the column names
+> gets skipped too, and a SELECT whose first row doesn't match doesn't
+> get skipped.
+
 
 ## What Query Types does Athena Support? 
 
 According to [SQL Reference for Amazon Athena](https://docs.aws.amazon.com/athena/latest/ug/ddl-sql-reference.html), Amazon Athena supports a subset of Data Definition Language (DDL) and Data Manipulation Language (DML) statements, functions, operators, and data types. With some exceptions, Athena DDL is based on HiveQL DDL and Athena DML is based on Presto 0.172. But except the common DDL and DML statements, Athena also supports two UTILITY statements: `DESC` and `SHOW`.
+
+> **Update:** Athena's DML engine has since moved on from
+> Presto to Trino, and AWS's docs no longer pin a specific version.
+> The UTILITY statement list has also grown — `EXPLAIN` and
+> `EXPLAIN ANALYZE` count as UTILITY too, so don't treat "just `DESC`
+> and `SHOW`" as closed.
 
 In Athena source code, it is defined like:
 
@@ -219,13 +246,24 @@ But due to encapsulation, more sepcifically the `rowsi` is _private_, we cannot 
 
 ## How to get the rows affected by my query?
   
-The recommended way is to use `DB.Exec()` to get it. Please refer to \ref{db-exec}.
+The recommended way is to use [`DB.Exec()`](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_db_exec/main.go) to get it.
 
 You can get it with `DB.Query()` too. In the returned `ResultSet`, there is an `UpdateCount` member variable. If the query is one of [`CTAS`](https://docs.aws.amazon.com/athena/latest/ug/ctas.html), [`CVAS`](https://docs.aws.amazon.com/athena/latest/ug/views.html) and `INSERT INTO`, `UpdateCount` will contain meaningful value. The result will be of a one row and one column. The column name is `rows`, and the row is an `int`, which is exactly `UpdateCount`. I would suggest to use `QueryRow` or `QueryRowContext` since it is a one-row result. By the way, the document for [`GetQueryResults`](https://docs.aws.amazon.com/athena/latest/APIReference/API_GetQueryResults.html) seems not very accurate.
+
+> **Update:** the driver doesn't actually key this off
+> statement type. It checks whether Athena itself named the result
+> column `rows`, which `CVAS` (`CREATE VIEW`) never does — a
+> `CREATE VIEW` returns no `rows` column and no `UpdateCount` at all.
+> The row's Go type is also `int64` (Athena's `bigint`), not a plain
+> `int`.
 
 ![UpdateCount for CTAS, VTAS, and INSERT INTO](issue_2.png)
 
 In practice, not only [`CTAS`](https://docs.aws.amazon.com/athena/latest/ug/ctas.html) statement but also `CVAS` and `INSERT INTO` will make a meaningful `UpdateCount`.
+
+> **Update:** this and the `CVAS` mention above are wrong,
+> see the correction under "`ColumnInfo` has cloumns but `Rows` are
+> empty".
 
 ## How to makes database/table/view more discoverable? (from @allenw)
 
@@ -318,9 +356,18 @@ More details are available at [DDL Statements](https://docs.aws.amazon.com/athen
 
 No. `DELETE` is not supported even in Athena database engine level, but `DROP` table and view are supported.
 
+> **Update:** that's still true for a plain Hive/external
+> table, but Amazon has since added
+> [Apache Iceberg table support](https://docs.aws.amazon.com/athena/latest/ug/querying-iceberg.html)
+> to Athena, and `DELETE` works there.
+
 ## Does Athena allow to `UPDATE` rows?
 
 No. `UPDATE` is not supported in Athena database engine level, but `ALTER` table and database are allowed.
+
+> **Update:** same story as `DELETE` above — Iceberg tables
+> now support `UPDATE` and even
+> [`MERGE INTO`](https://docs.aws.amazon.com/athena/latest/ug/merge-into-statement.html).
 
 ## Does Athena support cross account join or cross schema/database join? (from @allenw)
 
@@ -346,10 +393,22 @@ Sample Output:
 | elb_demo_009 | https://www.example.com/articles/746 |
 
 Cross account join seems a malformed question on its own. It is impossible to join table in two different accounts because Athena and SQL don't provide a way to refer to the table. It won't work to refer to a able like  `account_1.database1.table1`. It is completely possible that two databases or tables in different accounts have the same name. There is no way to differentiate them in SQL statement.
+
+> **Update:** this part is no longer true. You can now
+> [register another account's Glue Data Catalog](https://docs.aws.amazon.com/athena/latest/ug/gdc-register.html)
+> under a local name of your own choosing and query it with a normal
+> three-part reference (`shared_catalog_name.database.table`), or
+> reach it directly via
+> `"glue:arn:aws:glue:<region>:<data-account-id>:catalog".<db>.<table>`.
+> AWS Lake Formation's cross-account grants plus a resource link get
+> the same result. Same-Region only, and needs a recent-enough Athena
+> engine; see
+> [querying cross-account Data Catalogs](https://docs.aws.amazon.com/athena/latest/ug/lf-athena-limitations-cross-account.html).
+
 An alternative is to create a new database or table under the same account and query them.
 Because creating database in Athean is just create the metadata of some S3 data, it is a very lightweight operation.
 So this is a feasible and recommended solution. 
-If the s3 bucket owner and the account owner are different, you need to do [Cross-account Access](https://ocs.aws.amazon.com/athena/latest/ug/cross-account-permissions.html) setting.
+If the s3 bucket owner and the account owner are different, you need to do [Cross-account Access](https://docs.aws.amazon.com/athena/latest/ug/cross-account-permissions.html) setting.
 
 ## Contributing
 

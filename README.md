@@ -1416,14 +1416,14 @@ pre-fork history.
 
 
 [doc-img]: https://img.shields.io/badge/GoDoc-Reference-red.svg
-[doc]: https://pkg.go.dev/mod/github.com/CorkCyber/athenadriver
+[doc]: https://pkg.go.dev/mod/github.com/CorkCyber/athenadriver/v2
 
 
 [release-img]: https://img.shields.io/github/v/tag/CorkCyber/athenadriver?label=release
 [release]: https://github.com/CorkCyber/athenadriver/releases
 
-[report-card-img]: https://goreportcard.com/badge/github.com/CorkCyber/athenadriver
-[report-card]: https://goreportcard.com/report/github.com/CorkCyber/athenadriver
+[report-card-img]: https://goreportcard.com/badge/github.com/CorkCyber/athenadriver/v2
+[report-card]: https://goreportcard.com/report/github.com/CorkCyber/athenadriver/v2
 
 [license-img]: https://img.shields.io/badge/License-MIT-red
 [license]: https://github.com/CorkCyber/athenadriver/blob/main/LICENSE

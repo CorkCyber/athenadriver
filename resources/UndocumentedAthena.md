@@ -15,7 +15,7 @@ What Amazon did tell you is the following values are also valid and fully suppor
 
 `json`, `varbinary`, `row`, `interval year to month`,  `interval day to second`,  `time`,  `time with time zone`,  `timestamp with time zone`
 
-When querying against the above types, for the first three [`json`](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_json.go), [`varbinary`](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_geo.go), [`row`](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_row.go), **athenadriver** will return its string representation.
+When querying against the above types, for the first three [`json`](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_json/main.go), [`varbinary`](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_geo/main.go), [`row`](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_select_row/main.go), **athenadriver** will return its string representation.
 For the rest, a Go `time.Time` object will be returned.
  
 In the following sample code, we use an SQL statement to `SELECT` som simple data of all the above types and then print them out.
@@ -105,7 +105,7 @@ DESC sampledb.elb_logs
 
 We can see there are 3 columns according to `ColumnInfo` under `ResultSetMetadata`. But in the first row `Rows[0]`, we see there is only 1 field: `"elb_name \tstring    \t    "`. I would imagine there could have been 3 items in the `Data[0]`, but somehow the code author doesn't split it with tab(`\t`), so it ends up with only 1 item. The same issue happens for `SHOW` statement.
 
-For more sample code, please check [util_desc_table.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/util_desc_table.go), [util_desc_view.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/util_desc_view.go), and [util_show.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/util_show.go).
+For more sample code, please check [util_desc_table.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/util_desc_table/main.go), [util_desc_view.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/util_desc_view/main.go), and [util_show.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/util_show/main.go).
 
 - `awsathendriver`'s Solution:
 
@@ -141,7 +141,7 @@ Because this issue happens only in statements [`CTAS`](https://docs.aws.amazon.c
  returned from Athena, `athenadriver` sets `UpdateCount` as the value of
   the returned row.
 
-For more sample code, please check [ddl_ctas.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/ddl_ctas.go), [ddl_cvas.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/ddl_cvas.go), [dml_insert_into_select.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_insert_into_select.go) and [dml_insert_into_values.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_insert_into_values.go).
+For more sample code, please check [ddl_ctas.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/ddl_ctas/main.go), [ddl_cvas.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/ddl_cvas/main.go), [dml_insert_into_select.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_insert_into_select/main.go) and [dml_insert_into_values.go](https://github.com/CorkCyber/athenadriver/blob/main/examples/query/dml_insert_into_values/main.go).
 
 
 ## When the Row resultset contains Header

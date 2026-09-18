@@ -16,9 +16,13 @@ name: Release
 #
 # The athenareader and adapters jobs do check for it, though.
 # They query proxy.golang.org directly (GOWORK=off, bypassing this
-# repo's go.work) for the exact driver version their go.mod requires.
-# If it isn't published yet, the job fails loudly instead of quietly
-# building against the local workspace copy and looking fine.
+# repo's go.work) for the exact driver version their go.mod requires,
+# retrying for a bit since a driver tag published moments earlier can
+# take a beat to show up on the proxy. If it isn't published yet, the
+# job fails loudly instead of quietly building against the local
+# workspace copy and looking fine. Once confirmed, they also drop the
+# local replace directive before testing, so the test actually runs
+# against the published driver, not the in-repo copy.
 
 on:
   release:
@@ -27,6 +31,20 @@ on:
 permissions: {}
 
 jobs:
+  unmatched-tag:
+    name: unmatched release tag
+    if: >-
+      !startsWith(github.event.release.tag_name, 'v') &&
+      !startsWith(github.event.release.tag_name, 'athenareader/v') &&
+      !startsWith(github.event.release.tag_name, 'scope/')
+    runs-on: ubuntu-latest
+    permissions: {}
+    steps:
+      - name: fail
+        run: |
+          echo "::error::release tag '${{ github.event.release.tag_name }}' matches none of this workflow's patterns (v*, athenareader/v*, scope/*); nothing was validated or packaged"
+          exit 1
+
   driver:
     name: validate driver
     if: startsWith(github.event.release.tag_name, 'v')
@@ -51,6 +69,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # gh release upload
+    env:
+      # After the preflight, go.mod's local replace is dropped so every
+      # remaining step (test, cross-compile) builds against the real
+      # published driver, not go.work's in-repo copy.
+      GOWORK: "off"
     defaults:
       run:
         working-directory: athenareader
@@ -64,13 +87,24 @@ jobs:
       - name: driver release must exist first
         run: |
           ver="$(grep -m1 'github.com/CorkCyber/athenadriver/v2 ' go.mod | awk '{print $2}')"
-          if ! GOWORK=off GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org \
+          ok=false
+          for i in 1 2 3 4 5; do
+            if GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org \
                go list -m "github.com/CorkCyber/athenadriver/v2@${ver}" >/dev/null 2>&1; then
+              ok=true
+              break
+            fi
+            sleep 15
+          done
+          if [ "$ok" != true ]; then
             echo "::error::driver ${ver} isn't published on the module proxy yet; release the driver (tag ${ver}) before this package"
             exit 1
           fi
-      - name: go test
-        run: go test -race ./...
+      - name: test against the published driver, not the local copy
+        run: |
+          go mod edit -dropreplace=github.com/CorkCyber/athenadriver/v2
+          GOFLAGS=-mod=mod go mod tidy
+          go test -race ./...
       - name: cross-compile
         run: |
           version="${GITHUB_REF_NAME#athenareader/}"
@@ -94,6 +128,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+    env:
+      # After the preflight, go.mod's local replace is dropped so the
+      # test actually runs against the published driver, not go.work's
+      # in-repo copy.
+      GOWORK: "off"
     steps:
       - uses: actions/checkout@v4
         with:
@@ -105,14 +144,24 @@ jobs:
         run: |
           moddir="$(dirname "${GITHUB_REF_NAME}")" # scope/otel/v0.1.0 -> scope/otel
           ver="$(grep -m1 'github.com/CorkCyber/athenadriver/v2 ' "$moddir/go.mod" | awk '{print $2}')"
-          if ! GOWORK=off GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org \
+          ok=false
+          for i in 1 2 3 4 5; do
+            if GOFLAGS=-mod=mod GOPROXY=https://proxy.golang.org \
                go list -m "github.com/CorkCyber/athenadriver/v2@${ver}" >/dev/null 2>&1; then
+              ok=true
+              break
+            fi
+            sleep 15
+          done
+          if [ "$ok" != true ]; then
             echo "::error::driver ${ver} isn't published on the module proxy yet; release the driver (tag ${ver}) before this package"
             exit 1
           fi
-      - name: go test
+      - name: test against the published driver, not the local copy
         run: |
           moddir="$(dirname "${GITHUB_REF_NAME}")" # scope/otel/v0.1.0 -> scope/otel
           cd "$moddir"
+          go mod edit -dropreplace=github.com/CorkCyber/athenadriver/v2
+          GOFLAGS=-mod=mod go mod tidy
           go vet ./...
           go test -race ./...

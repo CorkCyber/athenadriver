@@ -1,6 +1,6 @@
 {
   ".": "2.0.1",
-  "athenareader": "1.0.0",
+  "athenareader": "1.0.1",
   "scope/otel": "0.1.0",
   "scope/tally": "0.1.0",
   "scope/statsd": "0.1.0"

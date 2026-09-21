@@ -4,6 +4,13 @@ All notable changes to this driver are documented here. Format roughly follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versions follow
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2](https://github.com/CorkCyber/athenadriver/compare/v2.0.1...v2.0.2) (2026-09-21)
+
+
+### Bug Fixes
+
+* **release-please:** stop sibling release PRs conflicting on the manifest ([42bbd83](https://github.com/CorkCyber/athenadriver/commit/42bbd8366edc57c2f71e99cf24ae6474357b2da4))
+
 ## [2.0.1](https://github.com/CorkCyber/athenadriver/compare/v2.0.0...v2.0.1) (2026-09-21)
 
 

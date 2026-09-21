@@ -1,6 +1,6 @@
 module github.com/CorkCyber/athenadriver/athenareader
 
-go 1.26.0
+go 1.26
 
 // v2.0.0 above has no published tag yet; this resolves it against the
 // in-repo driver so the module builds standalone outside the workspace.

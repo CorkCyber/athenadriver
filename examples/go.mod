@@ -1,6 +1,6 @@
 module github.com/CorkCyber/athenadriver/examples
 
-go 1.26.0
+go 1.26
 
 // In-repo development against the driver + scope adapters in this same
 // checkout. Release builds of the examples should drop or override these.

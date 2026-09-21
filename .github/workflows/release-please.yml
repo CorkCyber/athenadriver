@@ -14,6 +14,15 @@ name: release-please
 #
 # Notes:
 #
+#   * With separate-pull-requests, every package's PR touches the same
+#     .release-please-manifest.json, but only the PR whose own release
+#     notes changed gets refreshed automatically — a sibling PR doesn't
+#     notice when another one merges, so its manifest copy goes stale
+#     and conflicts. "always-update": true in the config makes
+#     release-please force-push every open release PR onto the new
+#     HEAD on each push to main, so merging one PR rebases the rest
+#     before you ever see a conflict.
+#
 #   * First releases already shipped (driver 2.0.0, athenareader 1.0.0,
 #     scope/* 0.1.0) and each package's "release-as" pin has been
 #     removed accordingly. A future one-off version pin belongs in a

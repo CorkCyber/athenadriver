@@ -3,6 +3,7 @@
   "release-type": "go",
   "tag-separator": "/",
   "separate-pull-requests": true,
+  "always-update": true,
   "packages": {
     ".": {
       "component": "athenadriver",

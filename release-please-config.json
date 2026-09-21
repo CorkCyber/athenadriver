@@ -8,7 +8,6 @@
       "component": "athenadriver",
       "include-component-in-tag": false,
       "changelog-path": "CHANGELOG.md",
-      "release-as": "2.0.0",
       "exclude-paths": [
         "athenareader",
         "examples",
@@ -18,20 +17,16 @@
       ]
     },
     "athenareader": {
-      "component": "athenareader",
-      "release-as": "1.0.0"
+      "component": "athenareader"
     },
     "scope/otel": {
-      "component": "scope/otel",
-      "release-as": "0.1.0"
+      "component": "scope/otel"
     },
     "scope/tally": {
-      "component": "scope/tally",
-      "release-as": "0.1.0"
+      "component": "scope/tally"
     },
     "scope/statsd": {
-      "component": "scope/statsd",
-      "release-as": "0.1.0"
+      "component": "scope/statsd"
     }
   }
 }

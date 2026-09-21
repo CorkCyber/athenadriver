@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.1](https://github.com/CorkCyber/athenadriver/compare/scope/otel/v0.1.0...scope/otel/v0.1.1) (2026-09-21)
+
+
+### Bug Fixes
+
+* stop go.work and module go directives fighting each other ([9c3b13c](https://github.com/CorkCyber/athenadriver/commit/9c3b13c0cb79418071287304c44babdb14349c3e))
+
 ## 0.1.0 (2026-09-21)
 
 

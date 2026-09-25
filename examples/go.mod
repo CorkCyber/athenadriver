@@ -1,6 +1,6 @@
 module github.com/CorkCyber/athenadriver/examples
 
-go 1.26
+go 1.26.0
 
 // In-repo development against the driver + scope adapters in this same
 // checkout. Release builds of the examples should drop or override these.
@@ -11,7 +11,7 @@ replace github.com/CorkCyber/athenadriver/scope/otel => ../scope/otel
 require (
 	github.com/CorkCyber/athenadriver/scope/otel v0.0.0-00010101000000-000000000000
 	github.com/CorkCyber/athenadriver/v2 v2.0.0
-	github.com/aws/aws-lambda-go v1.55.0
+	github.com/aws/aws-lambda-go v1.55.1
 	go.opentelemetry.io/otel v1.46.0
 	go.opentelemetry.io/otel/exporters/stdout/stdoutmetric v1.46.0
 	go.opentelemetry.io/otel/sdk/metric v1.46.0

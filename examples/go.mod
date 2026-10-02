@@ -1,6 +1,6 @@
 module github.com/CorkCyber/athenadriver/examples
 
-go 1.26
+go 1.26.0
 
 // In-repo development against the driver + scope adapters in this same
 // checkout. Release builds of the examples should drop or override these.
@@ -18,7 +18,7 @@ require (
 )
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.47.0 // indirect
+	github.com/aws/aws-sdk-go-v2 v1.47.1 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.33.5 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.5 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.0 // indirect

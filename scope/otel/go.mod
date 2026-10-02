@@ -1,6 +1,6 @@
 module github.com/CorkCyber/athenadriver/scope/otel
 
-go 1.26
+go 1.26.0
 
 require (
 	github.com/CorkCyber/athenadriver/v2 v2.0.0
@@ -12,7 +12,7 @@ require (
 )
 
 require (
-	github.com/aws/aws-sdk-go-v2 v1.47.0 // indirect
+	github.com/aws/aws-sdk-go-v2 v1.47.1 // indirect
 	github.com/aws/aws-sdk-go-v2/config v1.33.5 // indirect
 	github.com/aws/aws-sdk-go-v2/credentials v1.20.5 // indirect
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.20.0 // indirect
